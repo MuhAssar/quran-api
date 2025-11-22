@@ -24,6 +24,7 @@ async function bootstrap() {
   settings.DB_INDEX = dbFiles.find((file) => file.startsWith('index'));
   settings.DB_FARSH = dbFiles.find((file) => file.startsWith('farsh'));
   settings.DB_DATA = dbFiles.find((file) => file.startsWith('data'));
+  settings.DB_WORDS = dbFiles.find((file) => file.startsWith('words'));
 
   console.log(settings);
 

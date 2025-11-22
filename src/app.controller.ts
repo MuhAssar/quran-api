@@ -25,4 +25,9 @@ export class AppController {
   getFarsh(@Query('sql') sql: string): string[] {
     return this.appService.getFromDB(sql, settings.DB_FARSH);
   }
+
+  @Get('w')
+  getWords(@Query('sql') sql: string): string[] {
+    return this.appService.getFromDB(sql, settings.DB_WORDS);
+  }
 }
