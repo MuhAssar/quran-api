@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import * as Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
+
 @Injectable()
 export class AppService {
   getHello(): string {
@@ -11,23 +12,25 @@ export class AppService {
       return [];
     }
 
-    const readonly = true;
-    const db = new Database(dbFile, { readonly });
+    const readOnly = true;
+    const db = new DatabaseSync(dbFile, { readOnly });
     try {
-      if (!readonly) {
-        db.pragma('journal_mode = WAL');
+      if (!readOnly) {
+        db.exec('PRAGMA journal_mode = WAL');
       }
     } catch (err) {
-      db.close && db.close();
+      db.close();
       throw new BadRequestException(`${err.code}: ${err.message}\n`);
     }
 
     let rows = [];
     try {
-      if (sql.toLowerCase().includes('select')) {
-        rows = db.prepare(sql).all();
+      const stmt = db.prepare(sql);
+
+      if (sql.trim().toLowerCase().startsWith('select')) {
+        rows = stmt.all();
       } else {
-        db.prepare(sql).run();
+        stmt.run();
       }
     } catch (err) {
       db.close();
