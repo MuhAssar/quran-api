@@ -39,7 +39,7 @@ Because clients send raw SQL, this service is intended for **trusted-network dep
 | Language | TypeScript (target `es2022`, `commonjs` modules) | `tsconfig.json` |
 | Runtime | Node.js 22 (`.nvmrc`) | Required for `node:sqlite` built-in module |
 | Framework | Hono 4 (`hono`) on Node via `@hono/node-server` | Web-standard `Request`/`Response`; runs unchanged on Node, Bun, Deno, Cloudflare Workers |
-| Database driver | `node:sqlite` (`DatabaseSync`) — Node.js built-in | No native deps; no `better-sqlite3`/`sqlite3` package |
+| Database driver | `@libsql/client` (Node build) opening local files via `file:` URLs | Async API; ships prebuilt native bindings (libsql, a SQLite fork). The same client is used in Workers (Phase 2b in `PLAN.md`); only the URL changes (`file:./…` ↔ `libsql://….turso.io`). |
 | Dev runner | `tsx` | Used by `npm start` and `npm run start:dev` to run TS directly without a build step |
 | Lint / format | ESLint 8 + `@typescript-eslint` + Prettier (`singleQuote: true`, `trailingComma: 'all'`) | `.eslintrc.js`, `.prettierrc` |
 | Tests | Jest 29 + `ts-jest`; tests use Hono's `app.request()` directly (no HTTP loopback / supertest) | Configured in `package.json` |
@@ -89,7 +89,7 @@ quran-api/
    - `data*`  → role `'data'`
    - `farsh*` → role `'farsh'`
    - `words*` → role `'words'`
-   For each matched file, opens a single `DatabaseSync(path, { readOnly: true })` handle and stores it in module scope. The handle is reused for the lifetime of the process — there is **no per-request open/close**.
+   For each matched file, opens a single `@libsql/client` `Client` via `createClient({ url: 'file:' + path })` and stores it in module scope. The client is reused for the lifetime of the process — there is **no per-request open/close**.
 2. Logs the resolved file paths.
 3. Validates required databases:
    - Missing `data` → log error and `process.exit(1)`.
@@ -170,19 +170,20 @@ All endpoints accept a single query parameter `sql`. The value is forwarded verb
 ### 7.1 Request
 
 - Single query parameter `sql`, URL-encoded.
-- Whitespace at the start of the SQL is tolerated (`.trim().toLowerCase().startsWith('select')` decides between `stmt.all()` and `stmt.run()`).
+- Whitespace at the start of the SQL is tolerated; `.trim().toLowerCase().startsWith('select')` is the gate.
+- **Only `SELECT` statements are accepted.** Anything else returns 400 with `ERR_NOT_SELECT: only SELECT statements are allowed`. This is the application-layer write protection (see §10).
 - If `sql` is empty/missing, the response is `[]` (HTTP 200) without touching the database.
 
 ### 7.2 Response
 
 - `Content-Type: application/json; charset=UTF-8` for SQL routes (`c.json(rows)`).
-- Body: a JSON array of row objects keyed by column name (whatever `node:sqlite`'s `stmt.all()` returns).
-- For non-`SELECT` SQL the statement is `.run()` and the response is `[]`. In practice this fails first at the SQLite layer because handles are opened read-only (§10).
+- Body: a JSON array of row objects keyed by column name. `@libsql/client` returns `Row` objects whose own enumerable properties are exactly the column names, so `JSON.stringify` produces clean `{col: val, …}` objects with no numeric-index duplication.
 
 ### 7.3 Errors
 
-- Any thrown `SqliteError` (prepare error, run error) is caught and re-thrown as a Hono `HTTPException(400, …)` with body `${err.code}: ${err.message}\n` and `Content-Type: text/plain`. HTTP status is `400`.
-- A request to a route whose DB file was not discovered throws `ERR_DB_UNAVAILABLE: database for role "<role>" is not loaded` → also `400`.
+- Any thrown `LibsqlError` (parse error, runtime error) is caught and re-thrown as a Hono `HTTPException(400, …)` with body `${err.code}: ${err.message}\n` and `Content-Type: text/plain`. HTTP status is `400`.
+- Non-`SELECT` SQL → `400 ERR_NOT_SELECT`.
+- A request to a route whose DB file was not discovered → `400 ERR_DB_UNAVAILABLE: database for role "<role>" is not loaded`.
 
 ### 7.4 CORS
 
@@ -198,13 +199,13 @@ The `docs/api/` folder is a Bruno collection demonstrating each endpoint. The `l
 
 Three small modules, no DI container:
 
-- `src/db.ts` — owns the four DB handles in module scope. Exports:
+- `src/db.ts` — owns the four `@libsql/client` `Client` instances in module scope. Exports:
   - `ROLES` / `Role` — the four role names (`'index' | 'data' | 'farsh' | 'words'`).
-  - `openDatabases(searchDirs)` — discovers `*.db` files by prefix and opens one read-only `DatabaseSync` per role; returns the resolved file paths for logging. Idempotent: a role already opened is not reopened.
-  - `getDb(role)` — accessor for callers that want the raw handle.
-  - `runQuery(role, sql)` — the request-time entry point. Returns `[]` for empty SQL; otherwise prepares the statement on the persistent handle and dispatches to `stmt.all()` (for `SELECT`) or `stmt.run()` (otherwise).
+  - `openDatabases(searchDirs)` — discovers `*.db` files by prefix and opens one libsql `Client` per role via `createClient({ url: 'file:' + path })`; returns the resolved file paths for logging. Idempotent: a role already opened is not reopened.
+  - `getDb(role)` — accessor for callers that want the raw `Client`.
+  - `runQuery(role, sql): Promise<unknown[]>` — async. Returns `[]` for empty SQL; throws `ERR_NOT_SELECT` if SQL doesn't start with `select`; otherwise calls `client.execute(sql)` and returns `result.rows`.
   - `closeDatabases()` — for tests/teardown only.
-- `src/app.ts` — exports `createApp(): Hono`. Registers global CORS (`*`), the `GET /` hello, and the four `GET /{i,d,f,w}` SQL routes. Each SQL route reads `?sql=`, calls `runQuery(role, sql)`, and converts thrown errors into `HTTPException(400, …)` with the `code: message\n` body.
+- `src/app.ts` — exports `createApp(): Hono`. Registers global CORS (`*`), the `GET /` hello, and the four `GET /{i,d,f,w}` SQL routes. Each SQL route is async, reads `?sql=`, awaits `runQuery(role, sql)`, and converts thrown errors into `HTTPException(400, …)` with the `code: message\n` body.
 - `src/server.ts` — the entry point. Calls `openDatabases`, validates required roles (exits non-zero if `data` or `index` missing), then `serve({ fetch: app.fetch, port, hostname })`.
 
 There are no DTOs, pipes, guards, or interceptors. The only middleware is Hono's `cors()`.
@@ -227,12 +228,12 @@ Phase 1 of `PLAN.md` will add explicit `DB_*_PATH` env vars and a CORS allowlist
 
 This service is **dangerous to expose publicly as-is**. The design assumptions:
 
-1. **Trusted clients only.** Clients submit raw SQL. There is no allowlist, parser, or sanitizer.
-2. **Read-only at the SQLite layer.** Each `DatabaseSync(..., { readOnly: true })` handle prevents writes; opening in read-only mode also fails if the file does not exist (no accidental DB creation). Non-`SELECT` statements reaching `stmt.run()` will fail at the SQLite layer.
+1. **Trusted clients only.** Clients submit raw SQL. There is no allowlist, parser, or sanitizer beyond the `SELECT`-only gate.
+2. **Application-layer write protection.** `runQuery` rejects any SQL that does not start with `select` (case-insensitive, after `trim()`) with `400 ERR_NOT_SELECT`. This replaces the previous SQLite-driver-level read-only handle, because `@libsql/client` does not expose a `readOnly` flag for `file:` URLs (`?mode=ro` returns `URL_PARAM_NOT_SUPPORTED`). The SQL is *not* further parsed — `SELECT … RETURNING …` would still pass the gate, so don't rely on it as a sandbox.
 3. **No resource limits.** A pathological query (e.g. cross join of `wordsall` × `book_*`) will consume CPU and memory until the request finishes or the process is killed. There is no statement timeout, no `LIMIT` injection, no row cap.
-4. **Synchronous SQLite blocks the event loop.** A long query stalls *every* concurrent request on this Node process for its duration — a particularly important reason not to expose raw SQL publicly.
+4. **Async DB I/O does not stall the event loop** the way the previous `node:sqlite` `DatabaseSync` did, but a single expensive query still ties up CPU for its duration.
 5. **Error messages leak SQL/SQLite internals** in the 400 body (`code: message`). Acceptable for trusted clients; not acceptable for public exposure.
-6. **CORS is fully open.** Combined with read-only DBs this is intentional for browser-side use.
+6. **CORS is fully open.** Intentional for browser-side use.
 
 If/when this service is moved behind a public boundary, the gating layer must impose: query parsing/allowlisting, statement timeouts, row caps, rate limiting, and tightened CORS. See `PLAN.md` for the agreed migration toward typed routes + edge hosting.
 
@@ -276,10 +277,10 @@ Tests do not currently exercise the SQL path. New tests that hit `runQuery` shou
 
 ## 13. Operational notes and known issues
 
-- **Synchronous SQLite in an async server.** `DatabaseSync` blocks the Node event loop for the duration of every query. Long-running queries will stall the server. Consider a worker thread or `@libsql/client` (in async/HTTP mode) if/when long queries become common — the latter is the planned Phase 2 driver swap.
 - **Filename-prefix dispatch is ambiguous.** Shipping more than one `data*.db` (or `index*`, `farsh*`, `words*`) leads to nondeterministic selection. Treat the prefix as an exclusive role, not a glob.
 - **Strict TS checks disabled.** New code should not rely on this; ideally re-enable `strictNullChecks` incrementally.
-- **`node:sqlite` is still flagged experimental on Node 22.** Expect `ExperimentalWarning: SQLite is an experimental feature…` on stderr at startup. Behavior is stable enough for current use; revisit when it loses the flag.
+- **`@libsql/client` ships native bindings.** Install pulls a prebuilt binary for the current OS/arch (macOS, Linux, Windows on x64 / arm64). No build toolchain required, but the install footprint is larger than the previous `node:sqlite` (which was built into Node).
+- **No driver-level read-only mode for `file:` URLs.** Write protection is enforced at the application layer (§10). If that gate is ever bypassed, writes will succeed against the local files.
 
 ---
 

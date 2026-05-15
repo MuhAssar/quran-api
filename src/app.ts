@@ -4,10 +4,10 @@ import { HTTPException } from 'hono/http-exception';
 import { Role, runQuery } from './db';
 
 function sqlHandler(role: Role) {
-  return (c: import('hono').Context) => {
+  return async (c: import('hono').Context) => {
     const sql = c.req.query('sql') ?? '';
     try {
-      const rows = runQuery(role, sql);
+      const rows = await runQuery(role, sql);
       return c.json(rows);
     } catch (err) {
       const e = err as { code?: string; message?: string };

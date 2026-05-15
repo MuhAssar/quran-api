@@ -1,11 +1,11 @@
-import { DatabaseSync } from 'node:sqlite';
+import { createClient, type Client } from '@libsql/client';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 export const ROLES = ['index', 'data', 'farsh', 'words'] as const;
 export type Role = (typeof ROLES)[number];
 
-const handles: Partial<Record<Role, DatabaseSync>> = {};
+const clients: Partial<Record<Role, Client>> = {};
 const files: Partial<Record<Role, string>> = {};
 
 function listDbFiles(dir: string): string[] {
@@ -22,41 +22,42 @@ export function openDatabases(searchDirs: string[]): {
     if (found.length === 0) continue;
     for (const role of ROLES) {
       const file = found.find((f) => f.startsWith(role));
-      if (file && !handles[role]) {
+      if (file && !clients[role]) {
         const path = join(dir, file);
-        handles[role] = new DatabaseSync(path, { readOnly: true });
+        clients[role] = createClient({ url: 'file:' + path });
         files[role] = path;
       }
     }
-    if (Object.keys(handles).length === ROLES.length) break;
+    if (Object.keys(clients).length === ROLES.length) break;
   }
   return { files };
 }
 
-export function getDb(role: Role): DatabaseSync | undefined {
-  return handles[role];
+export function getDb(role: Role): Client | undefined {
+  return clients[role];
 }
 
-export function runQuery(role: Role, sql: string): unknown[] {
+export async function runQuery(role: Role, sql: string): Promise<unknown[]> {
   if (!sql) return [];
-  const db = handles[role];
-  if (!db) {
+  if (!sql.trim().toLowerCase().startsWith('select')) {
+    const err = new Error('only SELECT statements are allowed');
+    (err as { code?: string }).code = 'ERR_NOT_SELECT';
+    throw err;
+  }
+  const client = clients[role];
+  if (!client) {
     const err = new Error(`database for role "${role}" is not loaded`);
     (err as { code?: string }).code = 'ERR_DB_UNAVAILABLE';
     throw err;
   }
-  const stmt = db.prepare(sql);
-  if (sql.trim().toLowerCase().startsWith('select')) {
-    return stmt.all();
-  }
-  stmt.run();
-  return [];
+  const result = await client.execute(sql);
+  return result.rows;
 }
 
 export function closeDatabases(): void {
   for (const role of ROLES) {
-    handles[role]?.close();
-    delete handles[role];
+    clients[role]?.close();
+    delete clients[role];
     delete files[role];
   }
 }

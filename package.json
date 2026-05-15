@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",
+    "@libsql/client": "^0.14.0",
     "hono": "^4.6.0"
   },
   "devDependencies": {

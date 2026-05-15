@@ -98,22 +98,38 @@ Framework-only swap. Phase 1 (typed-route lockdown) was deferred and will run on
 
 After Phase 1.5 the service is deployable to any Node host (Fly.io, Render, Railway) and offline dev is a single `npm start`. It does **not** yet meet Goals 1 and 2 — those need Phase 2.
 
-### Phase 2 — Port to Workers + Turso (≈2 days from Phase 1.5)
+### Phase 2a — Driver swap on Node: `node:sqlite` → `@libsql/client` ✅
 
-Building on the Hono app from Phase 1.5, the only meaningful changes are: swap the DB driver, swap the runtime adapter, and add edge caching.
+Stays on Node, stays offline, `npm start` unchanged. Only the data layer changed.
+
+- [x] Added `@libsql/client`; removed the `node:sqlite` import from `src/db.ts`.
+- [x] Replaced `DatabaseSync(path, { readOnly: true })` with `createClient({ url: 'file:' + path })`. One client per role in module scope, same lifecycle.
+- [x] Converted `runQuery(role, sql)` to `async`; uses `client.execute(sql)` and returns `result.rows` (libsql's `Row` serializes as a clean `{col: val}` object — no remapping needed).
+- [x] Made `sqlHandler` in `src/app.ts` `async`; awaits `runQuery`.
+- [x] **Application-layer write protection** added in `runQuery`: rejects non-`SELECT` SQL with `400 ERR_NOT_SELECT`. This was needed because `@libsql/client` does not support `?mode=ro` for `file:` URLs (returns `URL_PARAM_NOT_SUPPORTED`). Externally-visible behavior matches the previous `node:sqlite` read-only handle (writes still 400).
+- [x] Verified `npm install && npm start` works with no network — confirmed via `lsof` that the libsql client opens zero non-loopback sockets when serving `file:` URLs.
+- [x] Smoke-tested all four routes: `/`, `/i` (sura list), `/d` (book_quran), `/f` (82,067 farsh rows), `/w` (83,927 words rows), empty SQL, invalid SQL, and a `CREATE TABLE` write attempt (rejected).
+- [x] `SPEC.md` updated (§3 driver row, §5 bootstrap, §7 request/response/errors, §8 architecture, §10 security, §13 ops).
+- [x] `ExperimentalWarning: SQLite is an experimental feature…` on stderr is gone (no longer using `node:sqlite`).
+
+After Phase 2a: handlers are async, the event-loop-blocking issue is gone, the driver is exactly the one Phase 2b will use, and Goal 3 still holds.
+
+### Phase 2b — Runtime swap: add Workers + Turso (≈1–1.5 days from Phase 2a)
+
+Adds a second runtime entry alongside the Node one. The Hono app, route handlers, and `db.ts` query code stay identical — only the URL the libsql client points at changes (`file:` for Node dev, `libsql://` for the deployed Worker).
 
 - [ ] `turso auth signup` → `turso db create quran`.
-- [ ] Import each bundled `.db` into Turso: `sqlite3 <file>.db ".dump" | turso db shell quran` (run per file; namespace tables if collisions occur, e.g. prefix `index_`, `words_`, `farsh_`).
-- [ ] Issue a read-only Turso token for the Worker.
-- [ ] Add a Cloudflare Workers entry alongside the Node entry (e.g. `src/worker.ts` exporting `{ fetch: app.fetch }`); the same `app: Hono` instance from Phase 1.5 serves both runtimes.
-- [ ] Swap `node:sqlite` for `@libsql/client` (`client.execute({ sql, args })`). Keep the call sites identical between Node (`file:./quran.db` or `http://127.0.0.1:8080`) and Workers (`libsql://….turso.io`).
-- [ ] Configure `wrangler.toml`; store `TURSO_URL` and `TURSO_TOKEN` via `wrangler secret put`.
+- [ ] Import each bundled `.db` into Turso: `sqlite3 <file>.db ".dump" | turso db shell quran` (one DB per role to avoid table-name collisions, *or* one consolidated DB with a `<role>__` prefix convention).
+- [ ] Issue a read-only Turso token.
+- [ ] Make `db.ts` URL-source aware: read the libsql URL from env (`DB_INDEX_URL`, `DB_DATA_URL`, …), defaulting to `file:./<file>.db` discovery on Node. The Worker entry sets the env to `libsql://…turso.io` URLs.
+- [ ] Add `src/worker.ts` exporting `{ fetch: app.fetch }`. Same `createApp()` from Phase 1.5/2a.
+- [ ] Configure `wrangler.toml`; store `TURSO_*_URL` and `TURSO_AUTH_TOKEN` via `wrangler secret put`.
 - [ ] Add `Cache-Control: public, s-maxage=86400, stale-while-revalidate=604800` to every GET handler.
 - [ ] (Optional) Add a Cloudflare Cache Rule to bypass the Worker entirely for hot URLs.
-- [ ] Port (rewrite) the `docs/api/` Bruno collection to the new route shapes.
-- [ ] **Wire up the `npm start` offline path (Goal 3):** make `npm start` spawn `turso dev --db-file ./quran.db` and `wrangler dev` together (e.g. via `concurrently` or `npm-run-all`). Document a one-time `npm run db:import` script that imports the bundled `.db` files into `./quran.db` so a fresh clone goes from zero to running offline with `npm install && npm run db:import && npm start`.
-- [ ] Verify `npm start` works with the network disabled — no calls to `*.turso.io`, no Cloudflare API calls, no auth prompts.
-- [ ] Rewrite `SPEC.md` to describe the Hono + Turso architecture; archive the NestJS sections.
+- [ ] Port (rewrite) the `docs/api/` Bruno collection to any updated route shapes.
+- [ ] **Re-verify Goal 3 after the change:** `npm start` (the Node entry) must still serve every route fully offline against the local `file:./<file>.db` URLs — no calls to `*.turso.io`, no Cloudflare API calls, no `wrangler` required for `npm start`.
+- [ ] Add `npm run start:worker` → `wrangler dev` for contributors who want to test the Workers runtime locally (Miniflare; offline once `wrangler` is installed but it does talk to Turso for data unless an embedded replica is configured).
+- [ ] Update `SPEC.md` §3 (add the Workers runtime), §4 (add `src/worker.ts`), §8 (note the dual-entry pattern), §11 (new scripts), and add a section on the deployed environment.
 
 ### Phase 3 — Custom domain + observability (≈½ day)
 
@@ -122,11 +138,10 @@ Building on the Hono app from Phase 1.5, the only meaningful changes are: swap t
 - [ ] Verify Turso usage dashboard shows expected read volumes.
 - [ ] Document `wrangler tail` for live log tailing in `SPEC.md`.
 
-### Phase 4 — Retire the NestJS deployment
+### Phase 4 — Retire any prior deployment
 
-- [ ] Remove the NestJS process from any prior host.
-- [ ] Remove unused dependencies (`@nestjs/*`, `express`, `node:sqlite` reference, `rimraf`).
-- [ ] Final `SPEC.md` pass: delete every reference to the old runtime.
+- [ ] Remove any pre-Hono process from any prior host (NestJS was already removed from the codebase in Phase 1.5; this is just decommissioning live deployments).
+- [ ] Final `SPEC.md` pass: delete every reference to drivers/runtimes that are no longer used.
 
 ---
 
@@ -134,11 +149,11 @@ Building on the Hono app from Phase 1.5, the only meaningful changes are: swap t
 
 | Stays | Changes |
 |---|---|
-| All `.db` data, table schemas, column meanings | NestJS → Hono (Phase 1.5, on Node) → Hono on Workers (Phase 2) |
-| TypeScript, ESLint, Prettier configs | `node:sqlite` (sync, in-process) → `@libsql/client` (async, HTTP) — at Phase 2 only |
+| All `.db` data, table schemas, column meanings | NestJS → Hono on Node (Phase 1.5) → Hono on Node + Workers (Phase 2b) |
+| TypeScript, ESLint, Prettier configs | `node:sqlite` (sync) → `@libsql/client` with `file:` URL (async, Phase 2a) → same client with `libsql://` URL on Workers (Phase 2b) |
 | The four logical namespaces (sura/aya/page, translations, tafsir, words, farsh) | Raw SQL endpoint → typed REST routes (Phase 1) |
-| Bruno collection structure under `docs/api/` (contents rewritten) | Hosting model: long-lived Node process → stateless Workers (Phase 2) |
-| Single `npm start` for offline dev (Goal 3) | Build tool: NestJS CLI → `tsc` (or `tsup`) at Phase 1.5 |
+| Bruno collection structure under `docs/api/` (contents rewritten) | Hosting model: long-lived Node process → also runs as stateless Workers (Phase 2b adds, doesn't replace) |
+| Single `npm start` running pure Node, fully offline (Goal 3) | Build tool: NestJS CLI → `tsc` (Phase 1.5) |
 
 ---
 
@@ -159,4 +174,5 @@ Building on the Hono app from Phase 1.5, the only meaningful changes are: swap t
 - **Turso row-read budget.** 1 B reads/mo is generous, but a chatty endpoint that returns thousands of rows per call can spike usage. The mandatory `LIMIT` cap and edge caching mitigate this; monitor in Phase 3.
 - **Search latency.** Full-text search across `book_*` tables may need an FTS5 virtual table created during the Turso import.
 - **Client breakage.** Any current client relying on `?sql=…` will break in Phase 1. Confirm the consumer set before starting.
-- **`turso dev` availability.** Goal 3 depends on the `turso` CLI being installable on the contributor's OS. It supports macOS, Linux, and Windows (via WSL/native), so this is broadly safe — but if a contributor environment ever can't run `turso dev`, the fallback is `@libsql/client` with a `file:./quran.db` URL on a Node adapter for Hono (Hono runs unchanged on Node), which keeps the offline goal but loses runtime parity with production Workers.
+- **`turso dev` availability.** With the 2a/2b split, `npm start` no longer depends on `turso dev` at all — Phase 2a uses `@libsql/client` with `file:./<file>.db` directly (libsql's bundled native bindings open the local SQLite file). `turso dev` only matters if a contributor wants to test Worker behavior locally against a libSQL *server* rather than a local file; even that is optional since `wrangler dev` can point at the cloud Turso for one-off Worker testing.
+- **Native bindings in `@libsql/client`.** The Node build ships prebuilt binaries for macOS/Linux/Windows on x64 and arm64. Install is a regular `npm install` with no toolchain required, but the package is heavier than `node:sqlite` (which is built into Node). If a contributor environment ever lacks a prebuilt binary, fallback is to `@libsql/client/web` with a local `sqld` (`turso dev`) — back to the two-process setup, but only as an escape hatch.
