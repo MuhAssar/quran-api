@@ -36,17 +36,18 @@ Because clients send raw SQL, this service is intended for **trusted-network dep
 
 | Layer | Choice | Notes |
 |---|---|---|
-| Language | TypeScript (target `es2017`, `commonjs` modules) | `tsconfig.json` |
+| Language | TypeScript (target `es2022`, `commonjs` modules) | `tsconfig.json` |
 | Runtime | Node.js 22 (`.nvmrc`) | Required for `node:sqlite` built-in module |
-| Framework | NestJS 11 (`@nestjs/common`, `@nestjs/core`, `@nestjs/platform-express`) | Express HTTP adapter |
+| Framework | Hono 4 (`hono`) on Node via `@hono/node-server` | Web-standard `Request`/`Response`; runs unchanged on Node, Bun, Deno, Cloudflare Workers |
 | Database driver | `node:sqlite` (`DatabaseSync`) — Node.js built-in | No native deps; no `better-sqlite3`/`sqlite3` package |
+| Dev runner | `tsx` | Used by `npm start` and `npm run start:dev` to run TS directly without a build step |
 | Lint / format | ESLint 8 + `@typescript-eslint` + Prettier (`singleQuote: true`, `trailingComma: 'all'`) | `.eslintrc.js`, `.prettierrc` |
-| Tests | Jest 28 + `ts-jest`; e2e via `supertest` | Configured in `package.json` and `test/jest-e2e.json` |
-| Build tool | NestJS CLI (`nest build`) | `nest-cli.json`, `tsconfig.build.json` |
+| Tests | Jest 29 + `ts-jest`; tests use Hono's `app.request()` directly (no HTTP loopback / supertest) | Configured in `package.json` |
+| Build tool | `tsc -p tsconfig.build.json` | Plain TypeScript compiler, no NestJS CLI |
 
-`@nestjs/swc` is intentionally **not** used — it caused issues with `node:sqlite` (commit `bf64087`).
+`strictNullChecks`, `noImplicitAny`, and `strict` are disabled in `tsconfig.json`. Future code should not rely on the absence of these checks.
 
-`strictNullChecks`, `noImplicitAny`, and `strictBindCallApply` are disabled in `tsconfig.json`. Future code should not rely on the absence of these checks.
+NestJS was used previously and was removed in the Hono-on-Node migration (Phase 1.5 of `PLAN.md`). The route surface and behavior are preserved exactly; only the framework changed.
 
 ---
 
@@ -55,15 +56,10 @@ Because clients send raw SQL, this service is intended for **trusted-network dep
 ```
 quran-api/
 ├── src/
-│   ├── main.ts                  # Bootstrap, DB discovery, settings population
-│   ├── settings.ts              # Mutable singleton holding resolved DB filenames
-│   ├── app.module.ts            # Root NestJS module
-│   ├── app.controller.ts        # HTTP routes
-│   ├── app.controller.spec.ts   # Unit test for controller
-│   └── app.service.ts           # SQLite query execution
-├── test/
-│   ├── app.e2e-spec.ts          # End-to-end test against the running app
-│   └── jest-e2e.json            # E2E Jest config
+│   ├── server.ts                # Entry point: opens DBs, starts the Node server
+│   ├── app.ts                   # Hono app: routes + handlers
+│   ├── db.ts                    # DB discovery, persistent handles, query execution
+│   └── app.spec.ts              # Jest tests using `app.request()`
 ├── docs/api/                    # Bruno HTTP collection (request examples)
 │   ├── bruno.json
 │   ├── hello.bru
@@ -71,13 +67,12 @@ quran-api/
 │   ├── data.bru
 │   ├── farsh.bru
 │   └── environments/localhost.bru
-├── *.db                          # SQLite database files (see §6). Gitignored.
-├── nest-cli.json
+├── *.db                         # SQLite database files (see §6). Gitignored.
 ├── tsconfig.json
 ├── tsconfig.build.json
 ├── .eslintrc.js
 ├── .prettierrc
-├── .nvmrc                        # Node 22
+├── .nvmrc                       # Node 22
 └── package.json
 ```
 
@@ -87,27 +82,27 @@ quran-api/
 
 ## 5. Bootstrap and database discovery
 
-`src/main.ts` performs the following on startup:
+`src/server.ts` is the entry point. On startup:
 
-1. Creates the Nest application from `AppModule`.
-2. Enables permissive CORS: `origin: '*'`.
-3. Reads the directory of the running script (`__dirname`) for `*.db` files. If none are found, retries one level up (`..`). This supports both `dist/` (production) and `src/` (dev) layouts when the DB files sit alongside or one level above the compiled code.
-4. Picks one file per role by **filename prefix**:
-   - `index*` → `settings.DB_INDEX`
-   - `data*`  → `settings.DB_DATA`
-   - `farsh*` → `settings.DB_FARSH`
-   - `words*` → `settings.DB_WORDS`
-5. Logs the resolved `settings` object.
-6. Validates required databases:
-   - Missing `DB_DATA` → log error and **abort startup** (process stays up but no listener).
-   - Missing `DB_INDEX` → log error and **abort startup**.
-   - Missing `DB_FARSH` → log a warning and continue.
-   - Missing `DB_WORDS` → silently allowed (route will fail at query time).
-7. Listens on port `3000` (hard-coded).
+1. Calls `openDatabases([__dirname, join(__dirname, '..')])` from `src/db.ts`. This walks the search directories in order and, on the first directory containing any `*.db` files, picks one file per role by **filename prefix**:
+   - `index*` → role `'index'`
+   - `data*`  → role `'data'`
+   - `farsh*` → role `'farsh'`
+   - `words*` → role `'words'`
+   For each matched file, opens a single `DatabaseSync(path, { readOnly: true })` handle and stores it in module scope. The handle is reused for the lifetime of the process — there is **no per-request open/close**.
+2. Logs the resolved file paths.
+3. Validates required databases:
+   - Missing `data` → log error and `process.exit(1)`.
+   - Missing `index` → log error and `process.exit(1)`.
+   - Missing `farsh` → log a warning and continue.
+   - Missing `words` → silently allowed (route will throw `ERR_DB_UNAVAILABLE` at query time).
+4. Builds the Hono app via `createApp()` from `src/app.ts`.
+5. Starts the Node HTTP server via `serve({ fetch: app.fetch, port, hostname })` from `@hono/node-server`. Port is `process.env.PORT` (default `3000`); hostname is `process.env.HOST` (default `0.0.0.0`).
 
 Implications:
 - If two files match the same prefix (e.g. `data_v20.db` and `data_v21.db`), the result is whichever `Array#find` returns first — **non-deterministic without ordering**. Operationally, ship exactly one file per role.
-- Port and CORS policy are hard-coded; changing them requires editing `main.ts`.
+- Boot failure is now a real `process.exit(1)` (improvement over the previous silent NestJS abort), so process supervisors detect it correctly.
+- DB handles are never closed during normal operation. `closeDatabases()` is exported from `db.ts` for tests/teardown.
 
 ---
 
@@ -164,35 +159,34 @@ Base URL (default): `http://localhost:3000`
 
 All endpoints accept a single query parameter `sql`. The value is forwarded verbatim to `db.prepare(sql)`.
 
-| Method | Path | Database | Description |
+| Method | Path | Role | Description |
 |---|---|---|---|
-| `GET` | `/`   | —          | Health/hello. Returns the literal string `Hello World!`. |
-| `GET` | `/i?sql=…` | `DB_INDEX` | Query the index database. |
-| `GET` | `/d?sql=…` | `DB_DATA`  | Query the data database. |
-| `GET` | `/f?sql=…` | `DB_FARSH` | Query the farsh database. |
-| `GET` | `/w?sql=…` | `DB_WORDS` | Query the words database. |
+| `GET` | `/`   | —          | Health/hello. Returns the literal string `Hello World!` (`Content-Type: text/plain`). |
+| `GET` | `/i?sql=…` | `index` | Query the index database. |
+| `GET` | `/d?sql=…` | `data`  | Query the data database. |
+| `GET` | `/f?sql=…` | `farsh` | Query the farsh database. |
+| `GET` | `/w?sql=…` | `words` | Query the words database. |
 
 ### 7.1 Request
 
 - Single query parameter `sql`, URL-encoded.
-- Whitespace at the start of the SQL is tolerated (`.trim().toLowerCase().startsWith('select')`).
-- If `sql` is empty/missing, the response is `[]` (HTTP 200) with no DB connection opened.
+- Whitespace at the start of the SQL is tolerated (`.trim().toLowerCase().startsWith('select')` decides between `stmt.all()` and `stmt.run()`).
+- If `sql` is empty/missing, the response is `[]` (HTTP 200) without touching the database.
 
 ### 7.2 Response
 
-- `Content-Type: application/json` (Nest default for non-string return values).
+- `Content-Type: application/json; charset=UTF-8` for SQL routes (`c.json(rows)`).
 - Body: a JSON array of row objects keyed by column name (whatever `node:sqlite`'s `stmt.all()` returns).
-- For non-`SELECT` SQL, the statement is `.run()` and the response is `[]`. (See §10 — this is gated by the read-only connection at the SQLite layer regardless.)
+- For non-`SELECT` SQL the statement is `.run()` and the response is `[]`. In practice this fails first at the SQLite layer because handles are opened read-only (§10).
 
 ### 7.3 Errors
 
-- Any thrown `SqliteError` (open error, prepare error, run error) is caught and re-thrown as Nest's `BadRequestException` with body containing `${err.code}: ${err.message}\n`. HTTP status is `400`.
-- The DB handle is closed in both success and failure paths inside `getFromDB`.
-- A request to a route whose database file was not discovered will hit `new DatabaseSync('', {readOnly:true})` and fail with a SQLite open error → 400.
+- Any thrown `SqliteError` (prepare error, run error) is caught and re-thrown as a Hono `HTTPException(400, …)` with body `${err.code}: ${err.message}\n` and `Content-Type: text/plain`. HTTP status is `400`.
+- A request to a route whose DB file was not discovered throws `ERR_DB_UNAVAILABLE: database for role "<role>" is not loaded` → also `400`.
 
 ### 7.4 CORS
 
-`Access-Control-Allow-Origin: *` is set globally in `main.ts`. There is no preflight customization.
+`Access-Control-Allow-Origin: *` is set globally via `cors({ origin: '*' })` in `src/app.ts`. No preflight customization.
 
 ### 7.5 Example clients
 
@@ -202,30 +196,30 @@ The `docs/api/` folder is a Bruno collection demonstrating each endpoint. The `l
 
 ## 8. Code architecture
 
-NestJS module graph is intentionally minimal:
+Three small modules, no DI container:
 
-- `AppModule` (`src/app.module.ts`) — registers `AppController` and `AppService`. No imports.
-- `AppController` (`src/app.controller.ts`) — five routes (§7), each delegating to `AppService.getFromDB` with the corresponding `settings.DB_*` filename.
-- `AppService` (`src/app.service.ts`) — single method `getFromDB(sql, dbFile)`:
-  1. Returns `[]` for empty `sql`.
-  2. Opens the file via `new DatabaseSync(dbFile, { readOnly: true })`. **A new connection is opened and closed per request.**
-  3. Has dead code for `PRAGMA journal_mode = WAL` gated behind `if (!readOnly)` where `readOnly` is a hard-coded `true` — never executes.
-  4. Decides between `stmt.all()` (for `SELECT`) and `stmt.run()` (otherwise) by string-prefix check.
-  5. Closes the DB and returns rows.
-- `settings` (`src/settings.ts`) — a single mutable object holding resolved DB filenames. Populated once at boot in `main.ts`.
+- `src/db.ts` — owns the four DB handles in module scope. Exports:
+  - `ROLES` / `Role` — the four role names (`'index' | 'data' | 'farsh' | 'words'`).
+  - `openDatabases(searchDirs)` — discovers `*.db` files by prefix and opens one read-only `DatabaseSync` per role; returns the resolved file paths for logging. Idempotent: a role already opened is not reopened.
+  - `getDb(role)` — accessor for callers that want the raw handle.
+  - `runQuery(role, sql)` — the request-time entry point. Returns `[]` for empty SQL; otherwise prepares the statement on the persistent handle and dispatches to `stmt.all()` (for `SELECT`) or `stmt.run()` (otherwise).
+  - `closeDatabases()` — for tests/teardown only.
+- `src/app.ts` — exports `createApp(): Hono`. Registers global CORS (`*`), the `GET /` hello, and the four `GET /{i,d,f,w}` SQL routes. Each SQL route reads `?sql=`, calls `runQuery(role, sql)`, and converts thrown errors into `HTTPException(400, …)` with the `code: message\n` body.
+- `src/server.ts` — the entry point. Calls `openDatabases`, validates required roles (exits non-zero if `data` or `index` missing), then `serve({ fetch: app.fetch, port, hostname })`.
 
-There are no DTOs, pipes, guards, interceptors, filters, or middleware beyond Nest defaults.
+There are no DTOs, pipes, guards, or interceptors. The only middleware is Hono's `cors()`.
 
 ---
 
 ## 9. Configuration
 
-- **Port**: hard-coded `3000` in `main.ts`.
-- **CORS**: hard-coded `*` in `main.ts`.
-- **DB locations**: discovered from `__dirname` (and parent) at boot. There is no environment variable.
-- There is no `.env` file and no `@nestjs/config` integration.
+- **Port**: `process.env.PORT` (default `3000`). Read in `src/server.ts`.
+- **Hostname**: `process.env.HOST` (default `0.0.0.0`).
+- **CORS**: hard-coded `*` in `src/app.ts`.
+- **DB locations**: discovered from `__dirname` (and parent) at boot. There is no environment variable yet for explicit paths.
+- There is no `.env` file and no config-loader library — direct `process.env` reads only.
 
-Future change to introduce env-based config should also externalize the port and DB directory.
+Phase 1 of `PLAN.md` will add explicit `DB_*_PATH` env vars and a CORS allowlist.
 
 ---
 
@@ -234,12 +228,13 @@ Future change to introduce env-based config should also externalize the port and
 This service is **dangerous to expose publicly as-is**. The design assumptions:
 
 1. **Trusted clients only.** Clients submit raw SQL. There is no allowlist, parser, or sanitizer.
-2. **Read-only at the SQLite layer.** `DatabaseSync(..., { readOnly: true })` prevents writes; an attempt to open a database in read-only mode also fails if the file does not exist (no accidental DB creation). Non-`SELECT` statements that pass the controller path into `stmt.run()` will fail at the SQLite layer.
+2. **Read-only at the SQLite layer.** Each `DatabaseSync(..., { readOnly: true })` handle prevents writes; opening in read-only mode also fails if the file does not exist (no accidental DB creation). Non-`SELECT` statements reaching `stmt.run()` will fail at the SQLite layer.
 3. **No resource limits.** A pathological query (e.g. cross join of `wordsall` × `book_*`) will consume CPU and memory until the request finishes or the process is killed. There is no statement timeout, no `LIMIT` injection, no row cap.
-4. **Error messages leak SQL/SQLite internals** in the 400 body (`code: message`). Acceptable for trusted clients; not acceptable for public exposure.
-5. **CORS is fully open.** Combined with read-only DBs this is intentional for browser-side use.
+4. **Synchronous SQLite blocks the event loop.** A long query stalls *every* concurrent request on this Node process for its duration — a particularly important reason not to expose raw SQL publicly.
+5. **Error messages leak SQL/SQLite internals** in the 400 body (`code: message`). Acceptable for trusted clients; not acceptable for public exposure.
+6. **CORS is fully open.** Combined with read-only DBs this is intentional for browser-side use.
 
-If/when this service is moved behind a public boundary, the gating layer must impose: query parsing/allowlisting, statement timeouts, row caps, rate limiting, and tightened CORS.
+If/when this service is moved behind a public boundary, the gating layer must impose: query parsing/allowlisting, statement timeouts, row caps, rate limiting, and tightened CORS. See `PLAN.md` for the agreed migration toward typed routes + edge hosting.
 
 ---
 
@@ -251,44 +246,40 @@ Scripts (`package.json`):
 
 | Script | Command | Purpose |
 |---|---|---|
-| `start` | `nest start` | Run from sources via ts-node. |
-| `start:dev` | `nest start --watch` | Watch mode. |
-| `start:debug` | `nest start --debug --watch` | Watch + inspector. |
+| `start` | `tsx src/server.ts` | **Run from sources directly.** No build step required — works on a fresh clone after `npm install`. Fully offline. |
+| `start:dev` | `tsx watch src/server.ts` | Watch mode (auto-restart on change). |
 | `prebuild` | `rimraf dist` | Clean output. |
-| `build` | `nest build` | Compile TS → `dist/` (uses `tsc`, not swc). |
-| `start:prod` | `node dist/main` | Run compiled output. |
-| `format` | `prettier --write …` | Format `src/` and `test/`. |
-| `lint` | `eslint … --fix` | Lint and auto-fix. |
-| `test` | `jest` | Unit tests (`*.spec.ts` under `src/`). |
-| `test:watch` / `test:cov` / `test:debug` | Jest variants | — |
-| `test:e2e` | `jest --config ./test/jest-e2e.json` | Boots the app and hits `/`. |
+| `build` | `tsc -p tsconfig.build.json` | Compile TS → `dist/`. |
+| `start:prod` | `node dist/server.js` | Run the compiled output. |
+| `format` | `prettier --write "src/**/*.ts"` | Format. |
+| `lint` | `eslint "src/**/*.ts" --fix` | Lint and auto-fix. |
+| `test` | `jest` | Tests (`*.spec.ts` under `src/`). |
+| `test:watch` / `test:cov` | Jest variants | — |
 
-Database files must be present in the working directory of the running process (or one level up). For `npm start` from the repo root, this means the `*.db` files at the repo root are used directly.
+Database files must be present in the working directory of the running process or one level up. For `npm start` from the repo root, the `*.db` files at the repo root are picked up directly.
 
 ---
 
 ## 12. Testing
 
-Two suites exist today:
+One suite, `src/app.spec.ts`. Tests use Hono's built-in `app.request('/…')` which returns a standard `Response` — no HTTP loopback, no `supertest`, no separate process.
 
-- `src/app.controller.spec.ts` — verifies `getHello()` returns `'Hello World!'`.
-- `test/app.e2e-spec.ts` — boots the full app via `Test.createTestingModule` and `GET /`.
+Current coverage:
+- `GET /` returns `Hello World!`.
+- `GET /i` with no `sql` returns `[]`.
 
-Neither suite exercises `getFromDB`. New tests touching the SQL path should:
-
-- Avoid depending on the bundled large DB files.
-- Either use a small fixture `.db` checked into a test-only fixtures directory, or open `:memory:` and seed it (note: `:memory:` is per-connection; the per-request open/close in `AppService` makes this awkward without refactoring the service to accept an injected DB handle).
+Tests do not currently exercise the SQL path. New tests that hit `runQuery` should either:
+- Provide a small fixture `.db` placed where `openDatabases()` will discover it, or
+- Refactor `db.ts` to accept an injectable handle (e.g. seed an in-memory `DatabaseSync(':memory:', { readOnly: false })` for the test process).
 
 ---
 
 ## 13. Operational notes and known issues
 
-- **Per-request connection open/close.** Every request pays the cost of opening the SQLite file, preparing the statement, executing, and closing. For the database sizes in use (up to ~300 MB), the OS page cache absorbs most of this, but throughput is bounded by single-statement latency. If sustained throughput becomes an issue, hold one `DatabaseSync` per role for the process lifetime instead of per-request — the database is read-only so concurrency is safe.
-- **Synchronous SQLite in an async server.** `DatabaseSync` blocks the Node event loop for the duration of every query. Long-running queries will stall the server. Consider `node:sqlite` async APIs or a worker thread if/when long queries become common.
-- **Boot-time abort is silent over HTTP.** If `DB_DATA` or `DB_INDEX` is missing, `bootstrap()` returns before `app.listen` and the process exits cleanly with a console error — there is no exit code distinguishing it from a normal shutdown. Wrappers/process managers should `grep` logs or be replaced with a `process.exit(1)` here.
+- **Synchronous SQLite in an async server.** `DatabaseSync` blocks the Node event loop for the duration of every query. Long-running queries will stall the server. Consider a worker thread or `@libsql/client` (in async/HTTP mode) if/when long queries become common — the latter is the planned Phase 2 driver swap.
 - **Filename-prefix dispatch is ambiguous.** Shipping more than one `data*.db` (or `index*`, `farsh*`, `words*`) leads to nondeterministic selection. Treat the prefix as an exclusive role, not a glob.
-- **Dead `PRAGMA journal_mode = WAL` branch** in `AppService` — kept for the day the connection is opened writable, but currently unreachable.
 - **Strict TS checks disabled.** New code should not rely on this; ideally re-enable `strictNullChecks` incrementally.
+- **`node:sqlite` is still flagged experimental on Node 22.** Expect `ExperimentalWarning: SQLite is an experimental feature…` on stderr at startup. Behavior is stable enough for current use; revisit when it loses the flag.
 
 ---
 
@@ -310,10 +301,12 @@ There is no in-app schema migration. The database files are produced and shipped
 
 ## 16. Pointers for future work
 
-When extending this service, prefer changes that preserve its core contract: **a thin, read-only, SQL pass-through over bundled SQLite databases**. Likely future directions, in roughly increasing risk order:
+The agreed direction lives in `PLAN.md`. Summary of the next likely changes:
 
-1. Externalize port and CORS via env (`@nestjs/config`).
-2. Switch from per-request to per-process `DatabaseSync` handles (read-only ⇒ thread-safe enough for sequential JS).
-3. Add a statement-timeout / row-cap interceptor before considering any public exposure.
-4. Add a typed REST surface for the most common queries (`/sura/:n`, `/aya/:idx`, `/page/:n/:mushaf`) layered **on top of** the existing raw endpoints, not replacing them.
-5. Replace prefix-based DB discovery with explicit env vars (`DB_DATA_PATH`, …) once more than one variant per role is plausible.
+1. **Phase 1 (lockdown):** replace the four raw-SQL routes with a typed REST surface (`/sura/:n`, `/aya/:idx`, `/page/:mushaf/:n`, …) and tighten CORS / add row caps. Necessary before any public exposure.
+2. **Phase 2 (Workers + Turso):** add a Cloudflare Workers entry that re-exports the same `app: Hono` and swap `node:sqlite` for `@libsql/client`. Keep the Node entry for `npm start` offline dev.
+3. **Phase 3:** custom domain on Cloudflare + Workers Analytics.
+
+Constraints to preserve through every step:
+- `npm start` must continue to run the service locally and offline with no cloud account, no internet, no Docker.
+- The Hono `app` instance stays runtime-agnostic; per-runtime entries (`server.ts` for Node, future `worker.ts` for Workers) are thin adapters around it.
