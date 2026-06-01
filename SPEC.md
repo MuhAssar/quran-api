@@ -8,27 +8,26 @@ This document is the single source of truth for the design, behavior, and operat
 
 `quran-api` is a small HTTP service that exposes the contents of several pre-built SQLite databases of Quran-related data (text, mushaf layout, words, translations, tafsir, qira'at, etc.) to client applications.
 
-It is intentionally a **thin pass-through layer**: clients submit raw SQL `SELECT` queries via query string, the service runs them against a chosen database file in read-only mode, and returns the rows as JSON.
+The service exposes a **curated, typed REST surface** (~15 endpoints, §7) over the bundled databases. All endpoint inputs are validated and bound as SQL parameters; no client-supplied SQL is executed.
 
-The service does **not** model any domain in code. All schema knowledge lives in the SQLite databases and in the clients that consume them.
+For backwards compatibility during the client migration to the curated surface, the service also keeps four **legacy raw-SQL pass-through routes** (`/i`, `/d`, `/f`, `/w`) that accept a `?sql=` query string and execute `SELECT` statements against the chosen DB. These will be removed once Wursha_QuranHolder's web build is migrated (Phase 1.10 in `PLAN.md`).
 
 ---
 
 ## 2. Scope and non-goals
 
 In scope:
-- Read-only access to bundled SQLite databases over HTTP.
-- Arbitrary `SELECT` SQL execution by the client.
-- CORS-open responses for browser clients.
+- Read-only access to bundled SQLite databases over HTTP via a curated REST surface.
+- Edge-friendly responses (long `Cache-Control` on every GET) so a future CDN layer can absorb most traffic.
+- CORS allowlist for browser clients (configurable per environment).
 
 Out of scope (intentionally):
 - Authentication, authorization, rate limiting, quotas.
-- A typed REST/GraphQL surface; clients write their own SQL.
-- ORM models, migrations, or schema validation in the application code.
-- Write traffic from clients (the service opens databases read-only).
+- ORM models, migrations, or schema validation in the application code (schema lives in the DB; views handle aliasing).
+- Write traffic from clients.
 - Multi-tenancy, user accounts, or per-request configuration.
 
-Because clients send raw SQL, this service is intended for **trusted-network deployment** (local app, embedded use, or a private network). It must not be exposed to the public internet without an additional layer in front of it.
+The curated routes are safe for **public deployment** (typed/bound inputs, capped result sizes, no client SQL). The legacy raw-SQL routes remain trusted-network only until they are removed.
 
 ---
 
@@ -57,15 +56,26 @@ NestJS was used previously and was removed in the Hono-on-Node migration (Phase 
 quran-api/
 ├── src/
 │   ├── server.ts                # Entry point: opens DBs, starts the Node server
-│   ├── app.ts                   # Hono app: routes + handlers
-│   ├── db.ts                    # DB discovery, persistent handles, query execution
+│   ├── app.ts                   # Hono app: all routes (curated + legacy)
+│   ├── db.ts                    # libsql clients, parameterized execute(), book-code discovery
+│   ├── editions.ts              # Edition allow-lists and per-resource capability checks
+│   ├── validators.ts            # assertInt / assertFloat / assertBookCode / optionalInt
 │   └── app.spec.ts              # Jest tests using `app.request()`
-├── docs/api/                    # Bruno HTTP collection (request examples)
+├── docs/api/                    # Bruno HTTP collection
 │   ├── bruno.json
-│   ├── hello.bru
-│   ├── index.bru
-│   ├── data.bru
-│   ├── farsh.bru
+│   ├── hello.bru                # legacy /
+│   ├── index.bru                # legacy /i?sql=
+│   ├── data.bru                 # legacy /d?sql=
+│   ├── farsh.bru                # legacy /f?sql=
+│   ├── curated/                 # curated REST examples
+│   │   ├── sora.bru
+│   │   ├── aya.bru
+│   │   ├── page-ayat.bru
+│   │   ├── aya-full.bru
+│   │   ├── search.bru
+│   │   ├── book-nearest.bru
+│   │   ├── farsh.bru
+│   │   └── word.bru
 │   └── environments/localhost.bru
 ├── *.db                         # SQLite database files (see §6). Gitignored.
 ├── tsconfig.json
@@ -159,35 +169,108 @@ Base URL (default): `http://localhost:3000`
 
 All endpoints accept a single query parameter `sql`. The value is forwarded verbatim to `db.prepare(sql)`.
 
-| Method | Path | Role | Description |
-|---|---|---|---|
-| `GET` | `/`   | —          | Health/hello. Returns the literal string `Hello World!` (`Content-Type: text/plain`). |
-| `GET` | `/i?sql=…` | `index` | Query the index database. |
-| `GET` | `/d?sql=…` | `data`  | Query the data database. |
-| `GET` | `/f?sql=…` | `farsh` | Query the farsh database. |
-| `GET` | `/w?sql=…` | `words` | Query the words database. |
+### 7.A Curated REST surface (15 routes)
 
-### 7.1 Request
+All curated GET responses set `Cache-Control: public, s-maxage=86400, stale-while-revalidate=604800` so a future edge cache absorbs most traffic. All inputs are validated and bound as SQL parameters; table/view names are only ever interpolated *after* the corresponding allow-list check.
 
-- Single query parameter `sql`, URL-encoded.
-- Whitespace at the start of the SQL is tolerated; `.trim().toLowerCase().startsWith('select')` is the gate.
-- **Only `SELECT` statements are accepted.** Anything else returns 400 with `ERR_NOT_SELECT: only SELECT statements are allowed`. This is the application-layer write protection (see §10).
-- If `sql` is empty/missing, the response is `[]` (HTTP 200) without touching the database.
+**Health**
 
-### 7.2 Response
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/` | Returns the literal string `Hello World!` (`Content-Type: text/plain`). |
 
-- `Content-Type: application/json; charset=UTF-8` for SQL routes (`c.json(rows)`).
-- Body: a JSON array of row objects keyed by column name. `@libsql/client` returns `Row` objects whose own enumerable properties are exactly the column names, so `JSON.stringify` produces clean `{col: val, …}` objects with no numeric-index duplication.
+**Index resources** (editions: `madina`, `shmrly`, `libya`)
 
-### 7.3 Errors
+| Method | Path | Returns |
+|---|---|---|
+| `GET` | `/editions/:edition/sora` | 114 rows from view `${edition}_sora` |
+| `GET` | `/editions/:edition/part` | 30 rows from view `${edition}_part` |
+| `GET` | `/editions/:edition/quarter` | 240 rows from view `${edition}_quarter` |
+| `GET` | `/editions/:edition/pages` | 604 rows from table `mosshf_${edition}_pages` |
 
-- Any thrown `LibsqlError` (parse error, runtime error) is caught and re-thrown as a Hono `HTTPException(400, …)` with body `${err.code}: ${err.message}\n` and `Content-Type: text/plain`. HTTP status is `400`.
-- Non-`SELECT` SQL → `400 ERR_NOT_SELECT`.
-- A request to a route whose DB file was not discovered → `400 ERR_DB_UNAVAILABLE: database for role "<role>" is not loaded`.
+**Mosshf (aya position)** (editions: `madina`, `shmrly`, `libya`, `tjwid`, `hafs`)
 
-### 7.4 CORS
+| Method | Path | Returns |
+|---|---|---|
+| `GET` | `/editions/:edition/aya/:idx` | One row from `mosshf_${edition}` by global aya index (1..6236) |
+| `GET` | `/editions/:edition/sora/:s/aya/:n` | One row, by sura number (1..114) + aya number (1..286) |
+| `GET` | `/editions/:edition/sora/:s/aya/:n/page` | Projected `page_number` only |
+| `GET` | `/editions/:edition/page/:n/ayat` | All ayat on a page (1..604), ordered |
 
-`Access-Control-Allow-Origin: *` is set globally via `cors({ origin: '*' })` in `src/app.ts`. No preflight customization.
+**Composite "all-data"** (editions: `madina`, `shmrly`, `libya`, `tjwid`)
+
+| Method | Path | Returns |
+|---|---|---|
+| `GET` | `/editions/:edition/aya/:idx/full` | One row from view `${edition}_all` (~67 columns: mosshf + every tafsir/translation/qira'at) |
+| `GET` | `/editions/:edition/page/:n/full` | All ayat on a page, full rows |
+
+**Search** (editions: `madina`, `shmrly`, `libya`, `tjwid`)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/editions/:edition/search` | Query string: `q` (required), `field` ∈ `text\|text_uthamni\|text_full\|roots` (default `text`), `sora` (optional, 1..114), `limit` (default 100, max 1000). Returns rows from view `${edition}_search` matching `<field> LIKE '%q%'`. |
+| `GET` | `/editions/:edition/search/count` | Same inputs except `limit`. Returns `{count: N}`. |
+
+**Book window** (any allow-listed `bookCode`; allow-list built at boot from `book_*` tables)
+
+| Method | Path | Returns |
+|---|---|---|
+| `GET` | `/book/:bookCode/aya/:idx/nearest` | `{text: …}` — the nearest book entry where `aya_index <= idx`. `null` if none. |
+
+**Farsh** (editions: `madina`, `shmrly`)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/editions/:edition/page/:n/farsh` | Query string: `qaree` ∈ `{A..Z}` (allow-listed), `waqf` ∈ `true\|false` (default `false`). Returns rows from physical table `madina`/`shmrly`. |
+
+**Words** (editions: `madina`, `shmrly`, `tjwid`)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/editions/:edition/page/:n/word/at` | Query string: `x`, `y` (floats 0..1). Returns the first word whose box contains `(x, y)`. |
+| `GET` | `/editions/:edition/word/:wordindex` | All instances of a word. |
+| `GET` | `/editions/:edition/word/:wordindex/aya-first` | `{wordindex}` of the first word in the same aya. With `?before=true`, the first word *before* `:wordindex` in that aya. |
+
+### 7.A.1 Static assets
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` / `HEAD` | `/athkar.zip` | Serves the bundled `athkar.zip` download (`Content-Type: application/zip`, `Content-Disposition: attachment`, `Cache-Control: public, max-age=86400`). Supports HTTP range requests (`206 Partial Content`) for resumable downloads. |
+
+This route is **Node-only**: it is registered in `src/server.ts` (not `src/app.ts`) via `serveStatic` from `@hono/node-server/serve-static`, which uses `node:fs`. It is intentionally kept out of the runtime-agnostic `app.ts` so the Workers build is unaffected. The file path is `ATHKAR_ZIP_PATH` (§9), defaulting to `../../assets/athkar.zip` relative to the repo root. A missing file falls through to `404`.
+
+### 7.B Legacy raw-SQL routes (deprecated, to be removed in Phase 1.10)
+
+These remain live while Wursha_QuranHolder is migrated to the curated surface:
+
+| Method | Path | Role |
+|---|---|---|
+| `GET` | `/i?sql=…` | `index` |
+| `GET` | `/d?sql=…` | `data` |
+| `GET` | `/f?sql=…` | `farsh` |
+| `GET` | `/w?sql=…` | `words` |
+
+- Only `SELECT` statements are accepted (app-layer gate); anything else → `400 ERR_NOT_SELECT`.
+- Empty `sql` → `200 []`.
+- Errors are wrapped as `400 <code>: <message>\n`.
+
+### 7.C Response shape
+
+- `Content-Type: application/json; charset=UTF-8` for JSON routes.
+- Single-row endpoints return either the row object or `null` (book/word window, word-at).
+- List endpoints return an array.
+- `@libsql/client` returns `Row` objects whose own enumerable properties are exactly the column names, so `JSON.stringify` produces clean `{col: val, …}` objects with no numeric-index duplication.
+
+### 7.D Errors
+
+- Bad input (missing/invalid path or query param, unknown bookCode/qaree/edition) → `400` with `Content-Type: text/plain`.
+- Known edition but the requested *resource* doesn't exist for it (e.g. `/editions/tjwid/sora` — tjwid has no sora view) → `404`.
+- Underlying `LibsqlError` → `400` with `<code>: <message>\n`.
+- DB role missing at boot → `400 ERR_DB_UNAVAILABLE` if any endpoint touches that role.
+
+### 7.E CORS
+
+Configured per environment via `CORS_ORIGINS` env var (comma-separated). Default is `*`. See §9.
 
 ### 7.5 Example clients
 
@@ -197,16 +280,20 @@ The `docs/api/` folder is a Bruno collection demonstrating each endpoint. The `l
 
 ## 8. Code architecture
 
-Three small modules, no DI container:
+Five small modules, no DI container:
 
 - `src/db.ts` — owns the four `@libsql/client` `Client` instances in module scope. Exports:
   - `ROLES` / `Role` — the four role names (`'index' | 'data' | 'farsh' | 'words'`).
-  - `openDatabases(searchDirs)` — discovers `*.db` files by prefix and opens one libsql `Client` per role via `createClient({ url: 'file:' + path })`; returns the resolved file paths for logging. Idempotent: a role already opened is not reopened.
-  - `getDb(role)` — accessor for callers that want the raw `Client`.
-  - `runQuery(role, sql): Promise<unknown[]>` — async. Returns `[]` for empty SQL; throws `ERR_NOT_SELECT` if SQL doesn't start with `select`; otherwise calls `client.execute(sql)` and returns `result.rows`.
+  - `openDatabases(searchDirs)` — **async**. For each role: uses `DB_${ROLE}_URL` env var if set, otherwise discovers `*.db` files by prefix and opens with `file:` URL. After opening the data client, populates the `bookCodes` set by querying `sqlite_master` for `book_*` tables.
+  - `getDb(role)` — raw `Client` accessor.
+  - `getBookCodes()` — the allow-list of bookCodes discovered at boot.
+  - `execute(role, sql, args?)` — parameter-bound query for curated routes; throws `ERR_DB_UNAVAILABLE` if the role isn't loaded.
+  - `runQuery(role, sql)` — legacy raw-SQL helper. Returns `[]` for empty SQL; throws `ERR_NOT_SELECT` if SQL doesn't start with `select`; otherwise delegates to `execute(role, sql)`.
   - `closeDatabases()` — for tests/teardown only.
-- `src/app.ts` — exports `createApp(): Hono`. Registers global CORS (`*`), the `GET /` hello, and the four `GET /{i,d,f,w}` SQL routes. Each SQL route is async, reads `?sql=`, awaits `runQuery(role, sql)`, and converts thrown errors into `HTTPException(400, …)` with the `code: message\n` body.
-- `src/server.ts` — the entry point. Calls `openDatabases`, validates required roles (exits non-zero if `data` or `index` missing), then `serve({ fetch: app.fetch, port, hostname })`.
+- `src/editions.ts` — edition allow-list + per-resource capability sets (`CAP_INDEX`, `CAP_PAGES`, `CAP_MOSSHF`, `CAP_ALL_SEARCH`, `CAP_WORDS`, `CAP_FARSH`); qaree allow-list; search-field allow-list. Exports `assertEdition(value, cap, capName)`, `assertQaree`, `assertSearchField` — each throws `HTTPException(400|404, …)`.
+- `src/validators.ts` — `assertInt`, `optionalInt`, `assertFloat`, `assertBookCode`. Pure helpers throwing `HTTPException(400, …)`.
+- `src/app.ts` — exports `createApp(): Hono`. Registers `cors()` (config from `CORS_ORIGINS`), the 4 legacy routes, and the 15 curated routes (§7.A). Each curated handler is async and follows the same shape: parse + validate path/query params via helpers, build a parameterized SQL string with the validated edition/book interpolated, await `execute(role, sql, args)`, return `c.json(rows)` with `Cache-Control: public, s-maxage=86400, stale-while-revalidate=604800`.
+- `src/server.ts` — the entry point. Reads `PORT`, `HOST`. Awaits `openDatabases([__dirname, ../])`, validates required roles (`process.exit(1)` if `data` or `index` missing), registers the Node-only static route `GET /athkar.zip` (§7.A.1) via `serveStatic`, then `serve({ fetch: app.fetch, port, hostname })`.
 
 There are no DTOs, pipes, guards, or interceptors. The only middleware is Hono's `cors()`.
 
@@ -214,28 +301,41 @@ There are no DTOs, pipes, guards, or interceptors. The only middleware is Hono's
 
 ## 9. Configuration
 
-- **Port**: `process.env.PORT` (default `3000`). Read in `src/server.ts`.
-- **Hostname**: `process.env.HOST` (default `0.0.0.0`).
-- **CORS**: hard-coded `*` in `src/app.ts`.
-- **DB locations**: discovered from `__dirname` (and parent) at boot. There is no environment variable yet for explicit paths.
-- There is no `.env` file and no config-loader library — direct `process.env` reads only.
+All via environment variables, read directly with `process.env`. No `.env` loader.
 
-Phase 1 of `PLAN.md` will add explicit `DB_*_PATH` env vars and a CORS allowlist.
+| Variable | Default | Purpose |
+|---|---|---|
+| `PORT` | `3000` | HTTP listen port. |
+| `HOST` | `0.0.0.0` | HTTP listen address. |
+| `CORS_ORIGINS` | `*` | Comma-separated origin allowlist for the `cors()` middleware. `*` keeps the wide-open behavior. |
+| `ATHKAR_ZIP_PATH` | `../../assets/athkar.zip` (relative to repo root) | Filesystem path to the `athkar.zip` asset served at `GET /athkar.zip` (§7.A.1). |
+| `DB_INDEX_URL` | (filesystem discovery) | Override the libsql URL for the index DB. Accepts any libsql URL: `file:/path/to/index.db`, `libsql://…turso.io`, `http://127.0.0.1:8080`. |
+| `DB_DATA_URL` | (filesystem discovery) | Same, for the data DB. |
+| `DB_FARSH_URL` | (filesystem discovery) | Same, for the farsh DB. |
+| `DB_WORDS_URL` | (filesystem discovery) | Same, for the words DB. |
+
+If any `DB_*_URL` is unset, `openDatabases` falls back to filesystem discovery (look for `*.db` files starting with the role prefix in `__dirname` then `__dirname/..`).
 
 ---
 
 ## 10. Security model
 
-This service is **dangerous to expose publicly as-is**. The design assumptions:
+The **curated routes (§7.A) are safe to expose publicly.** Every endpoint:
+- validates path/query inputs against typed ranges and allow-lists (editions, qaree, search-field, bookCode);
+- interpolates only allow-listed strings into table/view names;
+- binds every value as a SQL parameter (`@libsql/client` `{ sql, args }`) — no string concatenation;
+- caps result sets (114/30/240/604 for index resources; per-page for mosshf/composite; max 1000 for search; single-row for word lookups and book window).
 
-1. **Trusted clients only.** Clients submit raw SQL. There is no allowlist, parser, or sanitizer beyond the `SELECT`-only gate.
-2. **Application-layer write protection.** `runQuery` rejects any SQL that does not start with `select` (case-insensitive, after `trim()`) with `400 ERR_NOT_SELECT`. This replaces the previous SQLite-driver-level read-only handle, because `@libsql/client` does not expose a `readOnly` flag for `file:` URLs (`?mode=ro` returns `URL_PARAM_NOT_SUPPORTED`). The SQL is *not* further parsed — `SELECT … RETURNING …` would still pass the gate, so don't rely on it as a sandbox.
-3. **No resource limits.** A pathological query (e.g. cross join of `wordsall` × `book_*`) will consume CPU and memory until the request finishes or the process is killed. There is no statement timeout, no `LIMIT` injection, no row cap.
-4. **Async DB I/O does not stall the event loop** the way the previous `node:sqlite` `DatabaseSync` did, but a single expensive query still ties up CPU for its duration.
-5. **Error messages leak SQL/SQLite internals** in the 400 body (`code: message`). Acceptable for trusted clients; not acceptable for public exposure.
-6. **CORS is fully open.** Intentional for browser-side use.
+The **legacy raw-SQL routes (§7.B) are not safe for public exposure** and will be removed in Phase 1.10:
 
-If/when this service is moved behind a public boundary, the gating layer must impose: query parsing/allowlisting, statement timeouts, row caps, rate limiting, and tightened CORS. See `PLAN.md` for the agreed migration toward typed routes + edge hosting.
+1. Clients submit raw SQL — no allowlist or parser beyond the `SELECT`-only gate.
+2. `runQuery` rejects non-`SELECT` SQL with `400 ERR_NOT_SELECT`. The SQL is not further parsed — `SELECT … RETURNING …` would still pass.
+3. No resource limits — a pathological cross join consumes CPU/memory until the request finishes.
+4. Error bodies expose SQLite internals (`<code>: <message>`).
+
+`CORS_ORIGINS` (default `*`) should be tightened in production deployments to the known web origin of Wursha_QuranHolder.
+
+The legacy routes share the process with the curated routes, so attackers reaching them can still exhaust the server. Restrict deployment posture accordingly until Phase 1.10 ships.
 
 ---
 
@@ -265,22 +365,20 @@ Database files must be present in the working directory of the running process o
 
 One suite, `src/app.spec.ts`. Tests use Hono's built-in `app.request('/…')` which returns a standard `Response` — no HTTP loopback, no `supertest`, no separate process.
 
-Current coverage:
-- `GET /` returns `Hello World!`.
-- `GET /i` with no `sql` returns `[]`.
+`beforeAll` calls `await openDatabases([process.cwd()])`, so tests run against the bundled `.db` files in the repo root. Add a fixture-DB path here when CI environments lack the binaries.
 
-Tests do not currently exercise the SQL path. New tests that hit `runQuery` should either:
-- Provide a small fixture `.db` placed where `openDatabases()` will discover it, or
-- Refactor `db.ts` to accept an injectable handle (e.g. seed an in-memory `DatabaseSync(':memory:', { readOnly: false })` for the test process).
+Coverage at Phase 1 completion (31 tests): every curated route's happy path, at least one 400/404 per route, byte-shape spot-checks (`madina_all` returns ≥20 columns; `search` caps at 1000; capability gaps return 404), the two surviving legacy raw-SQL behaviors (empty SQL → `[]`, write rejected → 400), and a CORS smoke check.
 
 ---
 
 ## 13. Operational notes and known issues
 
-- **Filename-prefix dispatch is ambiguous.** Shipping more than one `data*.db` (or `index*`, `farsh*`, `words*`) leads to nondeterministic selection. Treat the prefix as an exclusive role, not a glob.
+- **Filename-prefix dispatch is ambiguous.** Shipping more than one `data*.db` (or `index*`, `farsh*`, `words*`) leads to nondeterministic selection. Treat the prefix as an exclusive role, not a glob. The `DB_${ROLE}_URL` env vars (§9) are the deterministic alternative.
 - **Strict TS checks disabled.** New code should not rely on this; ideally re-enable `strictNullChecks` incrementally.
 - **`@libsql/client` ships native bindings.** Install pulls a prebuilt binary for the current OS/arch (macOS, Linux, Windows on x64 / arm64). No build toolchain required, but the install footprint is larger than the previous `node:sqlite` (which was built into Node).
-- **No driver-level read-only mode for `file:` URLs.** Write protection is enforced at the application layer (§10). If that gate is ever bypassed, writes will succeed against the local files.
+- **Search uses simple `LIKE '%q%'` matching.** No Arabic normalization or pattern/word/root modes (yet). The audit found Wursha_QuranHolder normalizes Arabic text client-side before constructing the SQL; that normalization currently runs on the client and is preserved transparently because the curated `/search` simply substring-matches. Moving the normalization server-side is a follow-up — it lets clients pass raw query text and lets the server apply consistent rules.
+- **Edition coverage is asymmetric.** Index views exist for `madina`/`shmrly`/`libya`; `*_all`/`*_search` for `madina`/`shmrly`/`libya`/`tjwid`; `*_words` for `madina`/`shmrly`/`tjwid`; farsh tables for `madina`/`shmrly`. Other editions (warsh, qalon, hafs, …) ship as separate Cordova builds and don't currently need HTTP coverage. Requests for unsupported editions return `404`.
+- **Legacy raw-SQL routes still live** (§7.B) until Wursha_QuranHolder's web build is migrated and Phase 1.10 of `PLAN.md` ships.
 
 ---
 

@@ -4,7 +4,7 @@
   "description": "",
   "author": "Mohamed Assar",
   "private": true,
-  "license": "Proprietary",
+  "license": "ISC",
   "scripts": {
     "prebuild": "rimraf dist",
     "build": "tsc -p tsconfig.build.json",

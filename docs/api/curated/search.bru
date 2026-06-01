@@ -1,0 +1,16 @@
+meta {
+  name: editions/madina/search
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{baseUrl}}/editions/madina/search?q=الله&limit=10
+  body: none
+  auth: none
+}
+
+query {
+  q: الله
+  limit: 10
+}
