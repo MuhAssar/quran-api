@@ -1,17 +1,14 @@
 import { createApp } from './app';
-import { closeDatabases, openDatabases } from './db';
 import { closeContentDbs, contentDbDirs, openContentDbs } from './content-db';
 
 let app: ReturnType<typeof createApp>;
 
 beforeAll(async () => {
-  await openDatabases([process.cwd()]);
   openContentDbs(contentDbDirs(process.cwd()));
   app = createApp();
 });
 
 afterAll(async () => {
-  closeDatabases();
   await closeContentDbs();
 });
 
@@ -23,18 +20,12 @@ describe('health', () => {
   });
 });
 
-describe('legacy raw SQL (kept during client migration)', () => {
-  it('GET /d with empty sql returns []', async () => {
-    const res = await app.request('/d');
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual([]);
-  });
-
-  it('GET /d rejects non-SELECT with 400', async () => {
+describe('legacy raw SQL routes (removed after the DB split)', () => {
+  it.each(['/d', '/f', '/w'])('GET %s returns 404', async (path) => {
     const res = await app.request(
-      '/d?sql=' + encodeURIComponent('create table _x(y int)'),
+      path + '?sql=' + encodeURIComponent('select 1'),
     );
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(404);
   });
 });
 
