@@ -8,6 +8,8 @@ This document is the single source of truth for the design, behavior, and operat
 
 `quran-api` is a small HTTP service that exposes the contents of several pre-built SQLite databases of Quran-related data (text, mushaf layout, words, translations, tafsir, qira'at, etc.) to client applications.
 
+The databases are the **split content DBs** of the private `wursha-data` repo (October 2026, Wursha_QuranHolder `specs/data-db-split.md`): a core `quran_v1.db`, one `book_<key>_v1.db` per book, one `words_<layout>_v1.db` per word-coordinate layout, one `word_<key>_v1.db` per word-page tab and `farsh_v15.db`. Each file is a **target** (`quran`, `book.tabary`, `words.madina`, `word.sarf`, `farsh`); the app (web build) sends its SQL to `GET /db/:target` (§7.A.2), the same SQL the Cordova and Electron builds run on the same files. The monolithic `data_v25.db` / `words_v5.db` are no longer read by the curated routes; they are only opened for the legacy `/d`, `/f`, `/w` routes while older clients exist.
+
 The service exposes a **curated, typed REST surface** (14 endpoints, §7) over the bundled databases. All endpoint inputs are validated and bound as SQL parameters; no client-supplied SQL is executed.
 
 For backwards compatibility during the client migration to the curated surface, the service also keeps three **legacy raw-SQL pass-through routes** (`/d`, `/f`, `/w`) that accept a `?sql=` query string and execute `SELECT` statements against the chosen DB. These will be removed once Wursha_QuranHolder's web build is migrated (Phase 1.10 in `PLAN.md`).
@@ -59,7 +61,8 @@ quran-api/
 ├── src/
 │   ├── server.ts                # Entry point: opens DBs, starts the Node server
 │   ├── app.ts                   # Hono app: all routes (curated + legacy)
-│   ├── db.ts                    # libsql clients, parameterized execute(), book-code discovery
+│   ├── content-db.ts            # split content DBs: target registry, one libsql client per target, /db/:target
+│   ├── db.ts                    # legacy monolithic DBs (data/farsh/words roles) for /d /f /w
 │   ├── editions.ts              # Edition allow-lists and per-resource capability checks
 │   ├── validators.ts            # assertInt / assertFloat / assertBookCode / optionalInt
 │   └── app.spec.ts              # Jest tests using `app.request()`
@@ -94,16 +97,14 @@ quran-api/
 
 `src/server.ts` is the entry point. On startup:
 
-1. Calls `openDatabases([__dirname, join(__dirname, '..')])` from `src/db.ts`. This walks the search directories in order and, on the first directory containing any `*.db` files, picks one file per role by **filename prefix**:
+0. **Content DBs:** `openContentDbs(contentDbDirs(repoRoot))` from `src/content-db.ts`. The folders are, in order: `DB_DIR` (if set), `../wursha-data/dist/` (a local data build), `../Wursha_QuranHolder/.data-cache/current/` (the release the app last fetched). The **first** folder that contains a `quran_v*.db` is used for every target (folders are never mixed, so all files come from one data release). Each file name `<target with . → _>_v<N>.db` maps to a target; the highest `N` per target wins. A client is created on the first query of a target and checked against `_meta.key` (a renamed file fails instead of serving the wrong content). Startup fails (`process.exit(1)`) without `quran`, unless `DB_URL_TEMPLATE` is set (§9).
+1. **Legacy DBs** (for `/d`, `/f`, `/w` only): calls `openDatabases([__dirname, join(__dirname, '..')])` from `src/db.ts`. This walks the search directories in order and, on the first directory containing any `*.db` files, picks one file per role by **filename prefix**:
    - `data*`  → role `'data'`
    - `farsh*` → role `'farsh'`
    - `words*` → role `'words'`
    For each matched file, opens a single `@libsql/client` `Client` via `createClient({ url: 'file:' + path })` and stores it in module scope. The client is reused for the lifetime of the process — there is **no per-request open/close**.
 2. Logs the resolved file paths.
-3. Validates required databases:
-   - Missing `data` → log error and `process.exit(1)`.
-   - Missing `farsh` → log a warning and continue.
-   - Missing `words` → silently allowed (route will throw `ERR_DB_UNAVAILABLE` at query time).
+3. Missing legacy files are allowed: the legacy route then throws `ERR_DB_UNAVAILABLE` at query time.
 4. Builds the Hono app via `createApp()` from `src/app.ts`.
 5. Starts the Node HTTP server via `serve({ fetch: app.fetch, port, hostname })` from `@hono/node-server`. Port is `process.env.PORT` (default `3000`); hostname is `process.env.HOST` (default `0.0.0.0`).
 
@@ -116,7 +117,23 @@ Implications:
 
 ## 6. Database files
 
-The service expects up to three SQLite database files. Filenames carry version suffixes (e.g. `data_v21.db`); only the prefix matters to the loader.
+### 6.0 Split content DBs (what the curated routes and `/db/:target` read)
+
+Built and released by the `wursha-data` repo (its README lists the schemas; `_meta (key, value)` with `key`, `version`, `rev` in every file):
+
+| Target | File | Tables |
+|---|---|---|
+| `quran` | `quran_v1.db` | `mosshf_madina\|shmrly\|tjwid\|libya\|hafs`, `book_quran`, `book_quranu`, `quran_colors`, views `<edition>_search` |
+| `farsh` | `farsh_v15.db` | `madina`, `shmrly` |
+| `words.<layout>` | `words_<layout>_v1.db` (`madina`, `shmrly`, `tjwid`) | `words (wordindex, wordsno, aya_index, surah, ayah, page_number, x, y, width, word, rawword, root)`, key `(wordindex, wordsno)`; `madina` has no marker rows (`wordsno` 999/1000/1001) |
+| `book.<key>` | `book_<key>_v1.db` (62 books) | `book (aya_index INTEGER PRIMARY KEY, text)` |
+| `word.<key>` | `word_<key>_v1.db` (`meaning`, `sarf`, `irab`, `qeraat`, `trns`) | `word (wordindex INTEGER PRIMARY KEY, text)`; `qeraat` also `text_n` (the old `qeraatN`) |
+
+The `<edition>_all` and `<edition>_words` views of the monolithic files are gone: `/full` and the word routes compose the rows in code (§7.A).
+
+### 6.1–6.3 Legacy monolithic files (for `/d`, `/f`, `/w` only)
+
+The legacy loader expects up to three SQLite database files. Filenames carry version suffixes (e.g. `data_v21.db`); only the prefix matters to the loader.
 
 ### 6.1 `data_v21.db` (role: `DB_DATA`)
 Bulk content. ~65 tables, including but not limited to:
@@ -179,8 +196,8 @@ All curated GET responses set `Cache-Control: public, s-maxage=86400, stale-whil
 
 | Method | Path | Returns |
 |---|---|---|
-| `GET` | `/editions/:edition/aya/:idx/full` | One row from view `${edition}_all` (~67 columns: mosshf + every tafsir/translation/qira'at) |
-| `GET` | `/editions/:edition/page/:n/full` | All ayat on a page, full rows |
+| `GET` | `/editions/:edition/aya/:idx/full` | The `mosshf_${edition}` row plus `aya_text`, `aya_text_full`, `quranu` (the column names of the old `${edition}_all` view), and one column per book in `?books=a,b,…` (default: none; unknown book → 400), read from each `book.<key>`. `waqf` and `mwaqf` take the nearest preceding row (`NEAREST_BOOKS`), every other book its own row (`null` if none). |
+| `GET` | `/editions/:edition/page/:n/full` | All ayat on a page, same columns, ordered |
 
 **Search** (editions: `madina`, `shmrly`, `libya`, `tjwid`)
 
@@ -189,11 +206,11 @@ All curated GET responses set `Cache-Control: public, s-maxage=86400, stale-whil
 | `GET` | `/editions/:edition/search` | Query string: `q` (required), `field` ∈ `text\|text_uthamni\|text_full\|roots` (default `text`), `sora` (optional, 1..114), `limit` (default 100, max 1000). Returns rows from view `${edition}_search` matching `<field> LIKE '%q%'`. |
 | `GET` | `/editions/:edition/search/count` | Same inputs except `limit`. Returns `{count: N}`. |
 
-**Book window** (any allow-listed `bookCode`; allow-list built at boot from `book_*` tables)
+**Book window** (any allow-listed `bookCode`; allow-list = the `book.*` targets found at boot)
 
 | Method | Path | Returns |
 |---|---|---|
-| `GET` | `/book/:bookCode/aya/:idx/nearest` | `{text: …}` — the nearest book entry where `aya_index <= idx`. `null` if none. |
+| `GET` | `/book/:bookCode/aya/:idx/nearest` | `{text: …}` — the nearest row of `book` on `book.<bookCode>` where `aya_index <= idx`. `null` if none. |
 
 **Farsh** (editions: `madina`, `shmrly`)
 
@@ -205,9 +222,15 @@ All curated GET responses set `Cache-Control: public, s-maxage=86400, stale-whil
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/editions/:edition/page/:n/word/at` | Query string: `x`, `y` (floats 0..1). Returns the first word whose box contains `(x, y)`. |
-| `GET` | `/editions/:edition/word/:wordindex` | All instances of a word. |
+| `GET` | `/editions/:edition/page/:n/word/at` | Query string: `x`, `y` (floats 0..1). Returns the first word of `words` on `words.<layout>` whose box contains `(x, y)`. |
+| `GET` | `/editions/:edition/word/:wordindex` | The word's layout row (`wordsno < 999`, so no marker row) plus `meaning`, `sarf`, `irab`, `qeraat`, `qeraatN`, `trns` from the five `word.<key>` packs. |
 | `GET` | `/editions/:edition/word/:wordindex/aya-first` | `{wordindex}` of the first word in the same aya. With `?before=true`, the first word *before* `:wordindex` in that aya. |
+
+The edition → layout map is `WORDS_LAYOUT` in `editions.ts` (`madina`, `shmrly`, `tjwid` → their own layout).
+
+### 7.A.2 Raw SQL on one content DB: `GET /db/:target?sql=…`
+
+The channel the app's web build uses (`ContentDbService.query(target, sql)` in Wursha_QuranHolder): the SQL is the same the Cordova and Electron builds run on the same file. `:target` must match `farsh|quran|words.<x>|book.<x>|word.<x>` and be a known target, else `400`. Same rules as the legacy routes (§7.B): `SELECT` only (`400 ERR_NOT_SELECT`), empty `sql` → `200 []`, errors → `400 <code>: <message>`. Trusted network only (§10).
 
 ### 7.A.1 Static assets
 
@@ -217,9 +240,9 @@ All curated GET responses set `Cache-Control: public, s-maxage=86400, stale-whil
 
 This route is **Node-only**: it is registered in `src/server.ts` (not `src/app.ts`) via `serveStatic` from `@hono/node-server/serve-static`, which uses `node:fs`. It is intentionally kept out of the runtime-agnostic `app.ts` so the Workers build is unaffected. The file path is `ATHKAR_ZIP_PATH` (§9), defaulting to `../../assets/athkar.zip` relative to the repo root. A missing file falls through to `404`.
 
-### 7.B Legacy raw-SQL routes (deprecated, to be removed in Phase 1.10)
+### 7.B Legacy raw-SQL routes (deprecated)
 
-These remain live while Wursha_QuranHolder is migrated to the curated surface:
+These remain live only until no client uses them; Wursha_QuranHolder switched to `/db/:target` with the DB split, after which they are removed (data-db-split §5.4 step 3):
 
 | Method | Path | Role |
 |---|---|---|
@@ -257,19 +280,21 @@ The `docs/api/` folder is a Bruno collection demonstrating each endpoint. The `l
 
 ## 8. Code architecture
 
-Five small modules, no DI container:
+Six small modules, no DI container:
+
+- `src/content-db.ts` — the split content DBs. Exports `TARGET_RE`; `contentDbDirs(repoRoot)` (§5 step 0); `openContentDbs(dirs)` → `{ source, targets }`; `hasTarget(target)`; `getPackKeys('book' | 'word')` (keys of the `book.*` / `word.*` targets); `executeOn(target, sql, args?)` (bound query; one client per target, created on first use, `_meta.key` checked; unknown target → `ERR_UNKNOWN_TARGET`); `runTargetQuery(target, sql)` (`/db/:target`: empty → `[]`, non-`SELECT` → `ERR_NOT_SELECT`); `closeContentDbs()` for tests.
 
 - `src/db.ts` — owns the three `@libsql/client` `Client` instances in module scope. Exports:
   - `ROLES` / `Role` — the three role names (`'data' | 'farsh' | 'words'`).
   - `openDatabases(searchDirs)` — **async**. For each role: uses `DB_${ROLE}_URL` env var if set, otherwise discovers `*.db` files by prefix and opens with `file:` URL. After opening the data client, populates the `bookCodes` set by querying `sqlite_master` for `book_*` tables.
   - `getDb(role)` — raw `Client` accessor.
   - `getBookCodes()` — the allow-list of bookCodes discovered at boot.
-  - `execute(role, sql, args?)` — parameter-bound query for curated routes; throws `ERR_DB_UNAVAILABLE` if the role isn't loaded.
+  - `execute(role, sql, args?)` — parameter-bound query on a legacy role (no route uses it since the DB split); throws `ERR_DB_UNAVAILABLE` if the role isn't loaded.
   - `runQuery(role, sql)` — legacy raw-SQL helper. Returns `[]` for empty SQL; throws `ERR_NOT_SELECT` if SQL doesn't start with `select`; otherwise delegates to `execute(role, sql)`.
   - `closeDatabases()` — for tests/teardown only.
 - `src/editions.ts` — edition allow-list + per-resource capability sets (`CAP_MOSSHF`, `CAP_ALL_SEARCH`, `CAP_WORDS`, `CAP_FARSH`); qaree allow-list; search-field allow-list. Exports `assertEdition(value, cap, capName)`, `assertQaree`, `assertSearchField` — each throws `HTTPException(400|404, …)`.
 - `src/validators.ts` — `assertInt`, `optionalInt`, `assertFloat`, `assertBookCode`. Pure helpers throwing `HTTPException(400, …)`.
-- `src/app.ts` — exports `createApp(): Hono`. Registers `cors()` (config from `CORS_ORIGINS`), the 3 legacy routes, and the 14 curated routes (§7.A). Each curated handler is async and follows the same shape: parse + validate path/query params via helpers, build a parameterized SQL string with the validated edition/book interpolated, await `execute(role, sql, args)`, return `c.json(rows)` with `Cache-Control: public, s-maxage=86400, stale-while-revalidate=604800`.
+- `src/app.ts` — exports `createApp(): Hono`. Registers `cors()` (config from `CORS_ORIGINS`), the 3 legacy routes, and the 14 curated routes (§7.A). Each curated handler is async and follows the same shape: parse + validate path/query params via helpers, build a parameterized SQL string with the validated edition/book interpolated, await `executeOn(target, sql, args)` (`content-db.ts`), return `c.json(rows)` with `Cache-Control: public, s-maxage=86400, stale-while-revalidate=604800`.
 - `src/server.ts` — the entry point. Reads `PORT`, `HOST`. Awaits `openDatabases([__dirname, ../])`, validates required roles (`process.exit(1)` if `data` is missing), registers the Node-only static route `GET /athkar.zip` (§7.A.1) via `serveStatic`, then `serve({ fetch: app.fetch, port, hostname })`.
 
 There are no DTOs, pipes, guards, or interceptors. The only middleware is Hono's `cors()`.
@@ -286,6 +311,8 @@ All via environment variables, read directly with `process.env`. No `.env` loade
 | `HOST` | `0.0.0.0` | HTTP listen address. |
 | `CORS_ORIGINS` | `*` | Comma-separated origin allowlist for the `cors()` middleware. `*` keeps the wide-open behavior. |
 | `ATHKAR_ZIP_PATH` | `../../assets/athkar.zip` (relative to repo root) | Filesystem path to the `athkar.zip` asset served at `GET /athkar.zip` (§7.A.1). |
+| `DB_DIR` | (unset) | Folder with the split content DBs (§5 step 0); default `../wursha-data/dist/`, then `../Wursha_QuranHolder/.data-cache/current/`. |
+| `DB_URL_TEMPLATE` | (unset) | Hosted libsql: one database per target, e.g. `libsql://{target}-<org>.turso.io` (`.` in the target → `-`). Every target matching `TARGET_RE` then goes through the template; `DB_DIR` (if any) only lists the targets for the book allow-list. Check the hosting plan's database-count limit first (~70 databases). |
 | `DB_DATA_URL` | (filesystem discovery) | Override the libsql URL for the data DB. Accepts any libsql URL: `file:/path/to/data.db`, `libsql://…turso.io`, `http://127.0.0.1:8080`. |
 | `DB_FARSH_URL` | (filesystem discovery) | Same, for the farsh DB. |
 | `DB_WORDS_URL` | (filesystem discovery) | Same, for the words DB. |
@@ -341,9 +368,9 @@ Database files must be present in the working directory of the running process o
 
 One suite, `src/app.spec.ts`. Tests use Hono's built-in `app.request('/…')` which returns a standard `Response` — no HTTP loopback, no `supertest`, no separate process.
 
-`beforeAll` calls `await openDatabases([process.cwd()])`, so tests run against the bundled `.db` files in the repo root. Add a fixture-DB path here when CI environments lack the binaries.
+`beforeAll` calls `await openDatabases([process.cwd()])` and `openContentDbs(contentDbDirs(process.cwd()))`, so tests run against the split files of a local `../wursha-data` build (or the app's fetched release) and any legacy `.db` files in the repo root. Add a fixture-DB path here when CI environments lack the binaries.
 
-Coverage (28 tests, after the index routes were removed in October 2026): every curated route's happy path, at least one 400/404 per route, byte-shape spot-checks (`madina_all` returns ≥20 columns; `search` caps at 1000; capability gaps return 404), the two surviving legacy raw-SQL behaviors (empty SQL → `[]`, write rejected → 400), 404s for the removed `/i` and `/editions/:edition/sora`, and a CORS smoke check.
+Coverage (35 tests): `/db/:target` (core and book SELECTs, unknown and malformed target → 400, write → 400), `/full` with and without `?books=` (nearest-row `waqf`, unknown book → 400), plus, from before: every curated route's happy path, at least one 400/404 per route, byte-shape spot-checks (`madina_all` returns ≥20 columns; `search` caps at 1000; capability gaps return 404), the two surviving legacy raw-SQL behaviors (empty SQL → `[]`, write rejected → 400), 404s for the removed `/i` and `/editions/:edition/sora`, and a CORS smoke check.
 
 ---
 
@@ -361,7 +388,9 @@ Coverage (28 tests, after the index routes were removed in October 2026): every 
 
 ## 14. Versioning of databases
 
-DB files use a `_vNN` suffix encoding their schema/content version (e.g. `data_v21.db`, `farsh_v12.db`, `words_v2.db`). When a DB file is regenerated with a schema change, the suffix bumps and the prefix-based loader picks up the newer file as long as the older one is removed from the directory.
+**Split content DBs:** `_v<N>` is the schema version of the file's kind (`wursha-data` `versions.json`); a content fix keeps the name and raises `_meta.rev`. The registry takes the highest `N` per target in its folder. Point `DB_DIR` at a release's files (or keep the sibling data build / the app's `.data-cache/current` up to date) to serve the same data the apps ship.
+
+**Legacy files:** DB files use a `_vNN` suffix encoding their schema/content version (e.g. `data_v21.db`, `farsh_v12.db`, `words_v2.db`). When a DB file is regenerated with a schema change, the suffix bumps and the prefix-based loader picks up the newer file as long as the older one is removed from the directory.
 
 There is no in-app schema migration. The database files are produced and shipped externally.
 
