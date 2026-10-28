@@ -1,15 +1,18 @@
 import { createApp } from './app';
 import { closeDatabases, openDatabases } from './db';
+import { closeContentDbs, contentDbDirs, openContentDbs } from './content-db';
 
 let app: ReturnType<typeof createApp>;
 
 beforeAll(async () => {
   await openDatabases([process.cwd()]);
+  openContentDbs(contentDbDirs(process.cwd()));
   app = createApp();
 });
 
-afterAll(() => {
+afterAll(async () => {
   closeDatabases();
+  await closeContentDbs();
 });
 
 describe('health', () => {
@@ -30,6 +33,50 @@ describe('legacy raw SQL (kept during client migration)', () => {
   it('GET /d rejects non-SELECT with 400', async () => {
     const res = await app.request(
       '/d?sql=' + encodeURIComponent('create table _x(y int)'),
+    );
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('split content DBs (GET /db/:target)', () => {
+  it('runs a SELECT on the core', async () => {
+    const res = await app.request(
+      '/db/quran?sql=' +
+        encodeURIComponent(
+          'SELECT aya_index FROM mosshf_madina WHERE aya_index = 1',
+        ),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([{ aya_index: 1 }]);
+  });
+
+  it('runs a SELECT on a book pack', async () => {
+    const res = await app.request(
+      '/db/book.tabary?sql=' +
+        encodeURIComponent('SELECT count(*) AS n FROM book'),
+    );
+    expect(res.status).toBe(200);
+    const rows = (await res.json()) as Array<{ n: number }>;
+    expect(rows[0].n).toBeGreaterThan(6000);
+  });
+
+  it('rejects an unknown target with 400', async () => {
+    const res = await app.request(
+      '/db/book.nope?sql=' + encodeURIComponent('SELECT 1'),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a malformed target with 400', async () => {
+    const res = await app.request(
+      '/db/..%2Fdata?sql=' + encodeURIComponent('SELECT 1'),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects non-SELECT with 400', async () => {
+    const res = await app.request(
+      '/db/quran?sql=' + encodeURIComponent('delete from quran_colors'),
     );
     expect(res.status).toBe(400);
   });
@@ -101,12 +148,31 @@ describe('mosshf endpoints', () => {
 });
 
 describe('composite all-data', () => {
-  it('GET /editions/madina/aya/1/full returns one row with many columns', async () => {
+  it('GET /editions/madina/aya/1/full returns the verse with its core texts', async () => {
     const res = await app.request('/editions/madina/aya/1/full');
     expect(res.status).toBe(200);
     const rows = (await res.json()) as Array<Record<string, unknown>>;
     expect(rows).toHaveLength(1);
-    expect(Object.keys(rows[0]).length).toBeGreaterThan(20);
+    expect(rows[0].aya_text).toBeTruthy();
+    expect(rows[0].aya_text_full).toBeTruthy();
+    expect(rows[0].quranu).toBeTruthy();
+    expect(rows[0].tabary).toBeUndefined();
+  });
+
+  it('GET /editions/madina/aya/2/full?books=tabary,waqf adds those books', async () => {
+    const res = await app.request(
+      '/editions/madina/aya/2/full?books=tabary,waqf',
+    );
+    expect(res.status).toBe(200);
+    const rows = (await res.json()) as Array<Record<string, unknown>>;
+    expect(typeof rows[0].tabary).toBe('string');
+    // waqf has one row per waqf: verse 2 gets the nearest preceding one
+    expect(typeof rows[0].waqf).toBe('string');
+  });
+
+  it('GET /editions/madina/aya/1/full?books=nope returns 400', async () => {
+    const res = await app.request('/editions/madina/aya/1/full?books=nope');
+    expect(res.status).toBe(400);
   });
 
   it('GET /editions/madina/page/1/full returns multiple rows', async () => {
@@ -134,9 +200,7 @@ describe('search', () => {
 
   it('GET /editions/madina/search?q=…&limit=2000 caps at 1000', async () => {
     const res = await app.request(
-      '/editions/madina/search?q=' +
-        encodeURIComponent('ا') +
-        '&limit=2000',
+      '/editions/madina/search?q=' + encodeURIComponent('ا') + '&limit=2000',
     );
     expect(res.status).toBe(400);
   });

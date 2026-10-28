@@ -2,7 +2,8 @@ import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { join } from 'node:path';
 import { createApp } from './app';
-import { openDatabases, getBookCodes } from './db';
+import { openDatabases } from './db';
+import { contentDbDirs, getPackKeys, openContentDbs } from './content-db';
 
 // Path to the bundled athkar.zip download. Lives outside the repo
 // (../../assets relative to the repo root); override with ATHKAR_ZIP_PATH.
@@ -11,20 +12,23 @@ const ATHKAR_ZIP_PATH =
   join(__dirname, '..', '..', '..', 'assets', 'athkar.zip');
 
 async function main() {
-  const { files } = await openDatabases([
-    __dirname,
-    join(__dirname, '..'),
-  ]);
-  console.log('databases:', files);
-  console.log('book codes loaded:', getBookCodes().size);
-
-  if (!files.data) {
-    console.error('missing DB_DATA file!');
+  const content = openContentDbs(contentDbDirs(join(__dirname, '..')));
+  console.log(
+    'content DBs:',
+    content.source,
+    `(${content.targets.length} targets)`,
+  );
+  console.log('book packs:', getPackKeys('book').size);
+  if (!content.targets.includes('quran') && !process.env.DB_URL_TEMPLATE) {
+    console.error(
+      'missing quran_v*.db: set DB_DIR, build ../wursha-data (npm run build) or fetch the data in ../Wursha_QuranHolder',
+    );
     process.exit(1);
   }
-  if (!files.farsh) {
-    console.warn('missing DB_FARSH file!');
-  }
+
+  // Legacy monolithic DBs for /d, /f, /w (removed once no client uses them).
+  const { files } = await openDatabases([__dirname, join(__dirname, '..')]);
+  console.log('legacy databases:', files);
 
   const app = createApp();
 
