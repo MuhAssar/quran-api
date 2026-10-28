@@ -22,10 +22,6 @@ async function main() {
     console.error('missing DB_DATA file!');
     process.exit(1);
   }
-  if (!files.index) {
-    console.error('missing DB_INDEX file!');
-    process.exit(1);
-  }
   if (!files.farsh) {
     console.warn('missing DB_FARSH file!');
   }

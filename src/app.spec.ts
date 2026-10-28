@@ -21,8 +21,8 @@ describe('health', () => {
 });
 
 describe('legacy raw SQL (kept during client migration)', () => {
-  it('GET /i with empty sql returns []', async () => {
-    const res = await app.request('/i');
+  it('GET /d with empty sql returns []', async () => {
+    const res = await app.request('/d');
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual([]);
   });
@@ -32,43 +32,6 @@ describe('legacy raw SQL (kept during client migration)', () => {
       '/d?sql=' + encodeURIComponent('create table _x(y int)'),
     );
     expect(res.status).toBe(400);
-  });
-});
-
-describe('index resources', () => {
-  it('GET /editions/madina/sora returns 114 rows', async () => {
-    const res = await app.request('/editions/madina/sora');
-    expect(res.status).toBe(200);
-    const rows = (await res.json()) as unknown[];
-    expect(rows).toHaveLength(114);
-  });
-
-  it('GET /editions/madina/part returns 30 rows', async () => {
-    const res = await app.request('/editions/madina/part');
-    expect(res.status).toBe(200);
-    expect((await res.json()) as unknown[]).toHaveLength(30);
-  });
-
-  it('GET /editions/madina/quarter returns 240 rows', async () => {
-    const res = await app.request('/editions/madina/quarter');
-    expect(res.status).toBe(200);
-    expect((await res.json()) as unknown[]).toHaveLength(240);
-  });
-
-  it('GET /editions/madina/pages returns 604 rows', async () => {
-    const res = await app.request('/editions/madina/pages');
-    expect(res.status).toBe(200);
-    expect((await res.json()) as unknown[]).toHaveLength(604);
-  });
-
-  it('GET /editions/unknown/sora returns 400', async () => {
-    const res = await app.request('/editions/unknown/sora');
-    expect(res.status).toBe(400);
-  });
-
-  it('GET /editions/tjwid/sora returns 404 (capability gap)', async () => {
-    const res = await app.request('/editions/tjwid/sora');
-    expect(res.status).toBe(404);
   });
 });
 
@@ -114,6 +77,21 @@ describe('mosshf endpoints', () => {
   it('GET /editions/madina/aya/9999 returns [] (out of range)', async () => {
     const res = await app.request('/editions/madina/aya/9999');
     expect(res.status).toBe(400);
+  });
+
+  it('GET /editions/unknown/aya/1 returns 400', async () => {
+    const res = await app.request('/editions/unknown/aya/1');
+    expect(res.status).toBe(400);
+  });
+
+  it('GET /editions/madina/sora returns 404 (index routes removed; the app bundles that data)', async () => {
+    const res = await app.request('/editions/madina/sora');
+    expect(res.status).toBe(404);
+  });
+
+  it('GET /i returns 404 (legacy index route removed)', async () => {
+    const res = await app.request('/i?sql=' + encodeURIComponent('select 1'));
+    expect(res.status).toBe(404);
   });
 
   it('GET /editions/madina/aya/notanint returns 400', async () => {

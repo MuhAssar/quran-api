@@ -11,16 +11,6 @@ export type Edition = (typeof EDITIONS)[number];
 
 const EDITION_SET: ReadonlySet<string> = new Set(EDITIONS);
 
-export const CAP_INDEX: ReadonlySet<Edition> = new Set([
-  'madina',
-  'shmrly',
-  'libya',
-]);
-export const CAP_PAGES: ReadonlySet<Edition> = new Set([
-  'madina',
-  'shmrly',
-  'libya',
-]);
 export const CAP_MOSSHF: ReadonlySet<Edition> = new Set([
   'madina',
   'shmrly',

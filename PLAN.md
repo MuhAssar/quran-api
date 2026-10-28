@@ -79,7 +79,8 @@ Sub-steps:
 - [x] **1.7 Env config.** ✅ `PORT`, `HOST`, `CORS_ORIGINS`, `DB_INDEX_URL`, `DB_DATA_URL`, `DB_FARSH_URL`, `DB_WORDS_URL`. Each `DB_*_URL` takes priority over filesystem discovery, which stays as a fallback for the `npm start` workflow.
 - [x] **1.8 Integration tests.** ✅ 31 tests in `src/app.spec.ts` covering every curated route's happy path, at least one 400/404 per route, capability-gap 404s, search-cap rejection, byte-shape checks on the composite endpoint, the two surviving legacy behaviors, and a CORS smoke check. `beforeAll` opens DBs from `process.cwd()`. (Fixture-DB path deferred — only matters if CI lacks the binaries.)
 - [ ] **1.9 Migrate the client.** Coordinate with Wursha_QuranHolder: open a PR there that swaps each web-platform call site to the new endpoint. Cordova and Electron branches unchanged. `/i`, `/d`, `/f`, `/w` stay live during this period.
-- [ ] **1.10 Remove the raw-SQL routes** from `src/app.ts` and the SELECT-only gate from `src/db.ts`. Drop the `getDb` export if no caller uses it.
+  - **Index part obsolete (2026-10-28):** Wursha_QuranHolder PR #177 replaced `index_v14.db` with bundled JSON (`src/assets/json/index/`) read on every platform, so `IndexService` needs no endpoint. The `index` role, `/i` and the curated `/editions/:edition/sora|part|quarter|pages` routes (with `CAP_INDEX`/`CAP_PAGES` and `DB_INDEX_URL`) were removed from this repo; §7.1 below is historical.
+- [ ] **1.10 Remove the raw-SQL routes** from `src/app.ts` and the SELECT-only gate from `src/db.ts`. Drop the `getDb` export if no caller uses it. (`/i` is already gone with the index role; `/d`, `/f`, `/w` remain.)
 - [x] **1.11 Bruno collection.** ✅ Curated examples under `docs/api/curated/` (`sora`, `aya`, `page-ayat`, `aya-full`, `search`, `book-nearest`, `farsh`, `word`). Legacy `.bru` files at the top level kept until 1.10.
 - [x] **1.12 SPEC.md updates.** ✅ Rewrote §1, §2, §4, §7 (split into §7.A curated, §7.B legacy, §7.C/D/E response/errors/CORS), §8 (5-module architecture), §9 (full env-var table), §10 (curated routes safe to expose publicly; legacy routes not), §12 (test coverage), §13 (current known issues only).
 
@@ -196,7 +197,7 @@ Derived from auditing every call site in Wursha_QuranHolder. One row per real cl
 - All SQL is composed with libsql parameter binding; user-supplied strings are never interpolated.
 - Default response: `200` JSON. Errors: `400` for bad input, `404` for "no such resource" only where the client distinguishes (most empty results return `200 []`).
 
-### 7.1 Index resources — replaces `/i`
+### 7.1 Index resources — replaces `/i` (removed 2026-10-28; the client bundles this data, see 1.9)
 
 | Endpoint | Replaces | SQL pattern (illustrative) | Cap |
 |---|---|---|---|

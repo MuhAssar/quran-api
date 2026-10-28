@@ -2,7 +2,7 @@ import { createClient, type Client, type InValue } from '@libsql/client';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
-export const ROLES = ['index', 'data', 'farsh', 'words'] as const;
+export const ROLES = ['data', 'farsh', 'words'] as const;
 export type Role = (typeof ROLES)[number];
 
 const clients: Partial<Record<Role, Client>> = {};

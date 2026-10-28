@@ -5,9 +5,7 @@ import { execute, getBookCodes, runQuery, type Role } from './db';
 import {
   CAP_ALL_SEARCH,
   CAP_FARSH,
-  CAP_INDEX,
   CAP_MOSSHF,
-  CAP_PAGES,
   CAP_WORDS,
   assertEdition,
   assertQaree,
@@ -63,51 +61,9 @@ export function createApp(): Hono {
   app.get('/', (c) => c.text('Hello World!'));
 
   // ─── Legacy raw-SQL routes (kept during client migration) ────────────
-  app.get('/i', legacySqlHandler('index'));
   app.get('/d', legacySqlHandler('data'));
   app.get('/f', legacySqlHandler('farsh'));
   app.get('/w', legacySqlHandler('words'));
-
-  // ─── 7.1 Index resources ─────────────────────────────────────────────
-  app.get('/editions/:edition/sora', async (c) => {
-    const edition = assertEdition(c.req.param('edition'), CAP_INDEX, 'sora');
-    const rows = await execute(
-      'index',
-      `SELECT * FROM ${edition}_sora ORDER BY page_number`,
-    );
-    return withCache(c, rows);
-  });
-
-  app.get('/editions/:edition/part', async (c) => {
-    const edition = assertEdition(c.req.param('edition'), CAP_INDEX, 'part');
-    const rows = await execute(
-      'index',
-      `SELECT * FROM ${edition}_part ORDER BY page_number`,
-    );
-    return withCache(c, rows);
-  });
-
-  app.get('/editions/:edition/quarter', async (c) => {
-    const edition = assertEdition(
-      c.req.param('edition'),
-      CAP_INDEX,
-      'quarter',
-    );
-    const rows = await execute(
-      'index',
-      `SELECT * FROM ${edition}_quarter ORDER BY page_number`,
-    );
-    return withCache(c, rows);
-  });
-
-  app.get('/editions/:edition/pages', async (c) => {
-    const edition = assertEdition(c.req.param('edition'), CAP_PAGES, 'pages');
-    const rows = await execute(
-      'index',
-      `SELECT * FROM mosshf_${edition}_pages ORDER BY page_number`,
-    );
-    return withCache(c, rows);
-  });
 
   // ─── 7.2 Mosshf (aya position) ───────────────────────────────────────
   app.get('/editions/:edition/aya/:idx', async (c) => {
