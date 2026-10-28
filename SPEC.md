@@ -289,12 +289,12 @@ Six small modules, no DI container:
   - `openDatabases(searchDirs)` — **async**. For each role: uses `DB_${ROLE}_URL` env var if set, otherwise discovers `*.db` files by prefix and opens with `file:` URL. After opening the data client, populates the `bookCodes` set by querying `sqlite_master` for `book_*` tables.
   - `getDb(role)` — raw `Client` accessor.
   - `getBookCodes()` — the allow-list of bookCodes discovered at boot.
-  - `execute(role, sql, args?)` — parameter-bound query for curated routes; throws `ERR_DB_UNAVAILABLE` if the role isn't loaded.
+  - `execute(role, sql, args?)` — parameter-bound query on a legacy role (no route uses it since the DB split); throws `ERR_DB_UNAVAILABLE` if the role isn't loaded.
   - `runQuery(role, sql)` — legacy raw-SQL helper. Returns `[]` for empty SQL; throws `ERR_NOT_SELECT` if SQL doesn't start with `select`; otherwise delegates to `execute(role, sql)`.
   - `closeDatabases()` — for tests/teardown only.
 - `src/editions.ts` — edition allow-list + per-resource capability sets (`CAP_MOSSHF`, `CAP_ALL_SEARCH`, `CAP_WORDS`, `CAP_FARSH`); qaree allow-list; search-field allow-list. Exports `assertEdition(value, cap, capName)`, `assertQaree`, `assertSearchField` — each throws `HTTPException(400|404, …)`.
 - `src/validators.ts` — `assertInt`, `optionalInt`, `assertFloat`, `assertBookCode`. Pure helpers throwing `HTTPException(400, …)`.
-- `src/app.ts` — exports `createApp(): Hono`. Registers `cors()` (config from `CORS_ORIGINS`), the 3 legacy routes, and the 14 curated routes (§7.A). Each curated handler is async and follows the same shape: parse + validate path/query params via helpers, build a parameterized SQL string with the validated edition/book interpolated, await `execute(role, sql, args)`, return `c.json(rows)` with `Cache-Control: public, s-maxage=86400, stale-while-revalidate=604800`.
+- `src/app.ts` — exports `createApp(): Hono`. Registers `cors()` (config from `CORS_ORIGINS`), the 3 legacy routes, and the 14 curated routes (§7.A). Each curated handler is async and follows the same shape: parse + validate path/query params via helpers, build a parameterized SQL string with the validated edition/book interpolated, await `executeOn(target, sql, args)` (`content-db.ts`), return `c.json(rows)` with `Cache-Control: public, s-maxage=86400, stale-while-revalidate=604800`.
 - `src/server.ts` — the entry point. Reads `PORT`, `HOST`. Awaits `openDatabases([__dirname, ../])`, validates required roles (`process.exit(1)` if `data` is missing), registers the Node-only static route `GET /athkar.zip` (§7.A.1) via `serveStatic`, then `serve({ fetch: app.fetch, port, hostname })`.
 
 There are no DTOs, pipes, guards, or interceptors. The only middleware is Hono's `cors()`.
