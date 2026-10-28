@@ -2,7 +2,6 @@ import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { join } from 'node:path';
 import { createApp } from './app';
-import { openDatabases } from './db';
 import { contentDbDirs, getPackKeys, openContentDbs } from './content-db';
 
 // Path to the bundled athkar.zip download. Lives outside the repo
@@ -25,10 +24,6 @@ async function main() {
     );
     process.exit(1);
   }
-
-  // Legacy monolithic DBs for /d, /f, /w (removed once no client uses them).
-  const { files } = await openDatabases([__dirname, join(__dirname, '..')]);
-  console.log('legacy databases:', files);
 
   const app = createApp();
 

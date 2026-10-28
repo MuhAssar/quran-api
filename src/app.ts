@@ -1,7 +1,6 @@
 import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
 import { HTTPException } from 'hono/http-exception';
-import { runQuery, type Role } from './db';
 import {
   TARGET_RE,
   executeOn,
@@ -44,21 +43,6 @@ function corsConfig() {
 function withCache<T>(c: Context, body: T): Response {
   c.header('Cache-Control', CACHE_PUBLIC);
   return c.json(body as object);
-}
-
-function legacySqlHandler(role: Role) {
-  return async (c: Context) => {
-    const sql = c.req.query('sql') ?? '';
-    try {
-      const rows = await runQuery(role, sql);
-      return c.json(rows);
-    } catch (err) {
-      const e = err as { code?: string; message?: string };
-      throw new HTTPException(400, {
-        message: `${e.code ?? 'ERR'}: ${e.message ?? String(err)}\n`,
-      });
-    }
-  };
 }
 
 /** `?books=a,b` → known book keys (unknown ones are a 400). */
@@ -129,11 +113,6 @@ export function createApp(): Hono {
 
   // ─── Health ──────────────────────────────────────────────────────────
   app.get('/', (c) => c.text('Hello World!'));
-
-  // ─── Legacy raw-SQL routes (kept during client migration) ────────────
-  app.get('/d', legacySqlHandler('data'));
-  app.get('/f', legacySqlHandler('farsh'));
-  app.get('/w', legacySqlHandler('words'));
 
   // ─── Raw SQL on one split content DB (Wursha_QuranHolder specs/data-db-split.md §5) ───
   app.get('/db/:target', async (c) => {
