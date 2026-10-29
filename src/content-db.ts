@@ -9,9 +9,9 @@ import { join, resolve } from 'node:path';
  */
 
 export const TARGET_RE =
-  /^(farsh|quran|words\.[a-z0-9]+|book\.[a-z0-9]+|word\.[a-z0-9]+)$/;
+  /^(farsh|quran|words\.[a-z0-9]+|book\.[a-z0-9]+|word\.[a-z0-9]+|layout\.[a-z0-9]+)$/;
 const FILE_RE =
-  /^(farsh|quran|words_[a-z0-9]+|book_[a-z0-9]+|word_[a-z0-9]+)_v(\d+)\.db$/;
+  /^(farsh|quran|words_[a-z0-9]+|book_[a-z0-9]+|word_[a-z0-9]+|layout_[a-z0-9]+)_v(\d+)\.db$/;
 
 interface Entry {
   url: string;
