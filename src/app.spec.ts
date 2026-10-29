@@ -1,10 +1,15 @@
 import { createApp } from './app';
-import { closeContentDbs, contentDbDirs, openContentDbs } from './content-db';
+import {
+  closeContentDbs,
+  contentDbDirs,
+  layoutDbDirs,
+  openContentDbs,
+} from './content-db';
 
 let app: ReturnType<typeof createApp>;
 
 beforeAll(async () => {
-  openContentDbs(contentDbDirs(process.cwd()));
+  openContentDbs(contentDbDirs(process.cwd()), layoutDbDirs(process.cwd()));
   app = createApp();
 });
 
@@ -49,6 +54,16 @@ describe('split content DBs (GET /db/:target)', () => {
     expect(res.status).toBe(200);
     const rows = (await res.json()) as Array<{ n: number }>;
     expect(rows[0].n).toBeGreaterThan(6000);
+  });
+
+  it('runs a SELECT on a layout DB (from wursha-layouts)', async () => {
+    const res = await app.request(
+      '/db/layout.madina?sql=' +
+        encodeURIComponent('SELECT count(DISTINCT aya_index) AS n FROM mosshf'),
+    );
+    expect(res.status).toBe(200);
+    const rows = (await res.json()) as Array<{ n: number }>;
+    expect(rows[0].n).toBe(6236);
   });
 
   it('rejects an unknown target with 400', async () => {

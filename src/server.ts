@@ -2,7 +2,12 @@ import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { join } from 'node:path';
 import { createApp } from './app';
-import { contentDbDirs, getPackKeys, openContentDbs } from './content-db';
+import {
+  contentDbDirs,
+  getPackKeys,
+  layoutDbDirs,
+  openContentDbs,
+} from './content-db';
 
 // Path to the bundled athkar.zip download. Lives outside the repo
 // (../../assets relative to the repo root); override with ATHKAR_ZIP_PATH.
@@ -11,11 +16,14 @@ const ATHKAR_ZIP_PATH =
   join(__dirname, '..', '..', '..', 'assets', 'athkar.zip');
 
 async function main() {
-  const content = openContentDbs(contentDbDirs(join(__dirname, '..')));
+  const root = join(__dirname, '..');
+  const content = openContentDbs(contentDbDirs(root), layoutDbDirs(root));
   console.log(
     'content DBs:',
     content.source,
     `(${content.targets.length} targets)`,
+    'layouts:',
+    content.layoutSource ?? content.source,
   );
   console.log('book packs:', getPackKeys('book').size);
   if (!content.targets.includes('quran') && !process.env.DB_URL_TEMPLATE) {
