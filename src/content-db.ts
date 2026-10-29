@@ -3,15 +3,17 @@ import { existsSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 /**
- * The split content DBs of the wursha-data repo, one client per target, created on first use
- * (Wursha_QuranHolder specs/data-db-split.md §5). A target names one file:
- * `<target with . → _>_v<N>.db` (`quran` → `quran_v1.db`, `book.tabary` → `book_tabary_v1.db`).
+ * The split content DBs of the wursha-data repo, plus the layout DBs of the wursha-layouts repo, one
+ * client per target, created on first use (Wursha_QuranHolder specs/data-db-split.md §5). A target
+ * names one file: `<target with . → _>_v<N>.db` (`quran` → `quran_v1.db`, `book.tabary` →
+ * `book_tabary_v1.db`, `layout.madina` → `layout_madina_v1.db`).
  */
 
 export const TARGET_RE =
   /^(farsh|quran|words\.[a-z0-9]+|book\.[a-z0-9]+|word\.[a-z0-9]+|layout\.[a-z0-9]+)$/;
 const FILE_RE =
   /^(farsh|quran|words_[a-z0-9]+|book_[a-z0-9]+|word_[a-z0-9]+|layout_[a-z0-9]+)_v(\d+)\.db$/;
+const LAYOUT_FILE_RE = /^layout_[a-z0-9]+_v\d+\.db$/;
 
 interface Entry {
   url: string;
@@ -21,6 +23,7 @@ interface Entry {
 const registry = new Map<string, Entry>();
 const clients = new Map<string, Promise<Client>>();
 let source: string | undefined;
+let layoutSource: string | undefined;
 let urlTemplate: string | undefined;
 
 /** Where the files are looked for, in order: `DB_DIR`, the sibling data build, the app's fetched release. */
@@ -34,34 +37,72 @@ export function contentDbDirs(repoRoot: string): string[] {
 }
 
 /**
- * Builds the registry from the first folder that has a `quran_v*.db` (folders are never mixed, so
- * all files come from one data release), taking the highest version per target. With
- * `DB_URL_TEMPLATE` (hosted, e.g. `libsql://{target}-org.turso.io`; `.` in the target → `-`) every
- * target is reached through the template instead, and the folder (if any) only lists the targets.
+ * Where the layout DBs (`layout_<key>_v<N>.db`) are looked for, in order: `LAYOUT_DB_DIR`, the
+ * sibling wursha-layouts build, the app's fetched layouts release. Layouts live in wursha-layouts
+ * (Wursha_QuranHolder specs/mushaf-layouts.md §11.1); wursha-data releases up to v2026.11.1 also had
+ * them, and are used only when none of these folders has any.
  */
-export function openContentDbs(dirs: string[]): {
+export function layoutDbDirs(repoRoot: string): string[] {
+  const dirs = [
+    process.env.LAYOUT_DB_DIR?.trim(),
+    join(repoRoot, '..', 'wursha-layouts', 'dist'),
+    join(repoRoot, '..', 'Wursha_QuranHolder', '.layouts-cache', 'current'),
+  ];
+  return dirs.filter((dir): dir is string => !!dir).map((dir) => resolve(dir));
+}
+
+/**
+ * Builds the registry from the first folder that has a `quran_v*.db` (folders are never mixed, so
+ * all files come from one data release), taking the highest version per target. The `layout.*`
+ * targets then come from the first of `layoutDirs` that has a `layout_*_v*.db` (one layouts release
+ * or build), replacing any the data folder had. With `DB_URL_TEMPLATE` (hosted, e.g.
+ * `libsql://{target}-org.turso.io`; `.` in the target → `-`) every target is reached through the
+ * template instead, and the folders (if any) only list the targets.
+ */
+export function openContentDbs(
+  dirs: string[],
+  layoutDirs: string[] = [],
+): {
   source?: string;
+  layoutSource?: string;
   targets: string[];
 } {
   urlTemplate = process.env.DB_URL_TEMPLATE?.trim() || undefined;
-  for (const dir of dirs) {
-    if (!existsSync(dir)) continue;
-    const names = readdirSync(dir, { encoding: 'utf8' });
-    if (!names.some((name) => /^quran_v\d+\.db$/.test(name))) continue;
+  const register = (dir: string, names: string[], only?: RegExp) => {
     for (const name of names) {
       const match = FILE_RE.exec(name);
-      if (!match) continue;
+      if (!match || (only && !only.test(name))) continue;
       const target = match[1].replace('_', '.');
       const version = Number(match[2]);
       if ((registry.get(target)?.version ?? -1) < version) {
         registry.set(target, { url: 'file:' + join(dir, name), version });
       }
     }
+  };
+  for (const dir of dirs) {
+    if (!existsSync(dir)) continue;
+    const names = readdirSync(dir, { encoding: 'utf8' });
+    if (!names.some((name) => /^quran_v\d+\.db$/.test(name))) continue;
+    register(dir, names);
     source = dir;
+    break;
+  }
+  for (const dir of layoutDirs) {
+    if (!existsSync(dir)) continue;
+    const names = readdirSync(dir, { encoding: 'utf8' });
+    if (!names.some((name) => LAYOUT_FILE_RE.test(name))) continue;
+    for (const target of [...registry.keys()].filter((t) =>
+      t.startsWith('layout.'),
+    )) {
+      registry.delete(target);
+    }
+    register(dir, names, LAYOUT_FILE_RE);
+    layoutSource = dir;
     break;
   }
   return {
     source: urlTemplate ?? source,
+    layoutSource: urlTemplate ? undefined : layoutSource,
     targets: [...registry.keys()].sort(),
   };
 }
@@ -143,5 +184,6 @@ export async function closeContentDbs(): Promise<void> {
   clients.clear();
   registry.clear();
   source = undefined;
+  layoutSource = undefined;
   urlTemplate = undefined;
 }

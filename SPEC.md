@@ -8,7 +8,7 @@ This document is the single source of truth for the design, behavior, and operat
 
 `quran-api` is a small HTTP service that exposes the contents of several pre-built SQLite databases of Quran-related data (text, mushaf layout, words, translations, tafsir, qira'at, etc.) to client applications.
 
-The databases are the **split content DBs** of the private `wursha-data` repo (October 2026, Wursha_QuranHolder `specs/data-db-split.md`): a core `quran_v1.db`, one `book_<key>_v1.db` per book, one `words_<layout>_v1.db` per word-coordinate layout, one `word_<key>_v1.db` per word-page tab and `farsh_v15.db`. Each file is a **target** (`quran`, `book.tabary`, `words.madina`, `word.sarf`, `farsh`); the app (web build) sends its SQL to `GET /db/:target` (§7.A.2), the same SQL the Cordova and Electron builds run on the same files. The monolithic `data_v25.db` / `words_v5.db` / `farsh_v15.db` copies and their `data`/`farsh`/`words` roles are gone, with the legacy `/d`, `/f`, `/w` routes (removed after the app switched, data-db-split §5.4 step 3).
+The databases are the **split content DBs** of the private `wursha-data` repo (October 2026, Wursha_QuranHolder `specs/data-db-split.md`): a core `quran_v1.db`, one `book_<key>_v1.db` per book, one `words_<layout>_v1.db` per word-coordinate layout, one `word_<key>_v1.db` per word-page tab and `farsh_v15.db`, plus one `layout_<key>_v1.db` per Mushaf layout from the private `wursha-layouts` repo. Each file is a **target** (`quran`, `book.tabary`, `words.madina`, `word.sarf`, `farsh`, `layout.madina`); the app (web build) sends its SQL to `GET /db/:target` (§7.A.2), the same SQL the Cordova and Electron builds run on the same files. The monolithic `data_v25.db` / `words_v5.db` / `farsh_v15.db` copies and their `data`/`farsh`/`words` roles are gone, with the legacy `/d`, `/f`, `/w` routes (removed after the app switched, data-db-split §5.4 step 3).
 
 The service exposes a **curated, typed REST surface** (14 endpoints, §7) over the bundled databases. All endpoint inputs are validated and bound as SQL parameters; no client-supplied SQL is executed.
 
@@ -94,7 +94,7 @@ quran-api/
 
 `src/server.ts` is the entry point. On startup:
 
-1. **Content DBs:** `openContentDbs(contentDbDirs(repoRoot))` from `src/content-db.ts`. The folders are, in order: `DB_DIR` (if set), `../wursha-data/dist/` (a local data build), `../Wursha_QuranHolder/.data-cache/current/` (the release the app last fetched). The **first** folder that contains a `quran_v*.db` is used for every target (folders are never mixed, so all files come from one data release). Each file name `<target with . → _>_v<N>.db` maps to a target; the highest `N` per target wins. A client is created on the first query of a target and checked against `_meta.key` (a renamed file fails instead of serving the wrong content). Startup fails (`process.exit(1)`) without `quran`, unless `DB_URL_TEMPLATE` is set (§9).
+1. **Content DBs:** `openContentDbs(contentDbDirs(repoRoot), layoutDbDirs(repoRoot))` from `src/content-db.ts`. The folders are, in order: `DB_DIR` (if set), `../wursha-data/dist/` (a local data build), `../Wursha_QuranHolder/.data-cache/current/` (the release the app last fetched). The **first** folder that contains a `quran_v*.db` is used for every target (folders are never mixed, so all files come from one data release). The `layout.<key>` targets then come from the first layout folder that has a `layout_*_v*.db`: `LAYOUT_DB_DIR` (if set), `../wursha-layouts/dist/` (a local layouts build), `../Wursha_QuranHolder/.layouts-cache/current/` (the layouts release the app last fetched); they replace any layout DBs of the data folder (wursha-data releases up to v2026.11.1 had them). Each file name `<target with . → _>_v<N>.db` maps to a target; the highest `N` per target wins. A client is created on the first query of a target and checked against `_meta.key` (a renamed file fails instead of serving the wrong content). Startup fails (`process.exit(1)`) without `quran`, unless `DB_URL_TEMPLATE` is set (§9).
 2. Builds the Hono app via `createApp()` from `src/app.ts`.
 3. Starts the Node HTTP server via `serve({ fetch: app.fetch, port, hostname })` from `@hono/node-server`. Port is `process.env.PORT` (default `3000`); hostname is `process.env.HOST` (default `0.0.0.0`).
 
@@ -117,6 +117,7 @@ Built and released by the `wursha-data` repo (its README lists the schemas; `_me
 | `words.<layout>` | `words_<layout>_v1.db` (`madina`, `shmrly`, `tjwid`) | `words (wordindex, wordsno, aya_index, surah, ayah, page_number, x, y, width, word, rawword, root)`, key `(wordindex, wordsno)`; `madina` has no marker rows (`wordsno` 999/1000/1001) |
 | `book.<key>` | `book_<key>_v1.db` (62 books) | `book (aya_index INTEGER PRIMARY KEY, text)` |
 | `word.<key>` | `word_<key>_v1.db` (`meaning`, `sarf`, `irab`, `qeraat`, `trns`) | `word (wordindex INTEGER PRIMARY KEY, text)`; `qeraat` also `text_n` (the old `qeraatN`) |
+| `layout.<key>` | `layout_<key>_v1.db` (built and released by **`wursha-layouts`**, not wursha-data) | `mosshf` (verse geometry, one row per verse per page, `segment`), optional `words`, `farsh`; served through `/db/layout.<key>` only |
 
 The `<edition>_all` and `<edition>_words` views of the monolithic files are gone: `/full` and the word routes compose the rows in code (§7.A).
 
@@ -243,6 +244,7 @@ All via environment variables, read directly with `process.env`. No `.env` loade
 | `CORS_ORIGINS` | `*` | Comma-separated origin allowlist for the `cors()` middleware. `*` keeps the wide-open behavior. |
 | `ATHKAR_ZIP_PATH` | `../../assets/athkar.zip` (relative to repo root) | Filesystem path to the `athkar.zip` asset served at `GET /athkar.zip` (§7.A.1). |
 | `DB_DIR` | (unset) | Folder with the split content DBs (§5 step 1); default `../wursha-data/dist/`, then `../Wursha_QuranHolder/.data-cache/current/`. |
+| `LAYOUT_DB_DIR` | (unset) | Folder with the layout DBs (§5 step 1); default `../wursha-layouts/dist/`, then `../Wursha_QuranHolder/.layouts-cache/current/`. |
 | `DB_URL_TEMPLATE` | (unset) | Hosted libsql: one database per target, e.g. `libsql://{target}-<org>.turso.io` (`.` in the target → `-`). Every target matching `TARGET_RE` then goes through the template; `DB_DIR` (if any) only lists the targets for the book allow-list. Check the hosting plan's database-count limit first (~70 databases). |
 
 
@@ -290,7 +292,7 @@ Database files must be present in the working directory of the running process o
 
 One suite, `src/app.spec.ts`. Tests use Hono's built-in `app.request('/…')` which returns a standard `Response` — no HTTP loopback, no `supertest`, no separate process.
 
-`beforeAll` calls `openContentDbs(contentDbDirs(process.cwd()))`, so tests run against the split files of a local `../wursha-data` build (or the app's fetched release). Add a fixture-DB path here when CI environments lack the binaries.
+`beforeAll` calls `openContentDbs(contentDbDirs(process.cwd()), layoutDbDirs(process.cwd()))`, so tests run against the split files of a local `../wursha-data` build (or the app's fetched release) and the layout DBs of a local `../wursha-layouts` build (or the app's fetched layouts release). Add a fixture-DB path here when CI environments lack the binaries.
 
 Coverage (36 tests): `/db/:target` (core and book SELECTs, unknown and malformed target → 400, write → 400), `/full` with and without `?books=` (nearest-row `waqf`, unknown book → 400), plus, from before: every curated route's happy path, at least one 400/404 per route, spot-checks (`/full` core texts; `search` caps at 1000; capability gaps return 404), 404s for the removed `/d`, `/f`, `/w`, `/i` and `/editions/:edition/sora`, and a CORS smoke check.
 
