@@ -68,6 +68,18 @@ describe('split content DBs (GET /db/:target)', () => {
     expect(rows[0].n).toBe(6236);
   });
 
+  it('runs a SELECT on a farsh set', async () => {
+    const res = await app.request(
+      '/db/farsh.madina?sql=' +
+        encodeURIComponent(
+          "SELECT count(*) AS n FROM farsh WHERE page_number = 3 AND qaree = 'A'",
+        ),
+    );
+    expect(res.status).toBe(200);
+    const rows = (await res.json()) as Array<{ n: number }>;
+    expect(rows[0].n).toBeGreaterThan(0);
+  });
+
   it('rejects an unknown target with 400', async () => {
     const res = await app.request(
       '/db/book.nope?sql=' + encodeURIComponent('SELECT 1'),
@@ -75,8 +87,8 @@ describe('split content DBs (GET /db/:target)', () => {
     expect(res.status).toBe(400);
   });
 
-  it.each(['farsh', 'words.madina'])(
-    'rejects the retired legacy target %s with 400',
+  it.each(['farsh', 'farsh.nope', 'words.madina'])(
+    'rejects the retired legacy or unknown target %s with 400',
     async (target) => {
       const res = await app.request(
         `/db/${target}?sql=` + encodeURIComponent('SELECT 1'),

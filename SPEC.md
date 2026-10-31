@@ -108,7 +108,8 @@ Built and released by the `wursha-data` repo (its README lists the schemas; `_me
 | `quran` | `quran_v1.db` | `verses`, `book_quran`, `book_quranu`, `quran_colors`, view `quran_text` |
 | `book.<key>` | `book_<key>_v1.db` (62 books) | `book (aya_index INTEGER PRIMARY KEY, text)` |
 | `word.<key>` | `word_<key>_v1.db` (`meaning`, `sarf`, `irab`, `qeraat`, `trns`) | `word (wordindex INTEGER PRIMARY KEY, text)`; `qeraat` also `text_n` (the old `qeraatN`) |
-| `layout.<key>` | `layout_<key>_v1.db` (built and released by **`wursha-layouts`**, not wursha-data) | `mosshf` (verse geometry, one row per verse per page, `segment`), optional `words`, `farsh`; served through `/db/layout.<key>` only |
+| `farsh.<set>` | `farsh_<set>_v1.db` (`madina`, `shmrly`) | `farsh (qaree, page_number, color, x, y, width, style, circle)`: the farsh of one page set, shared by every layout on those pages (Wursha_QuranHolder `specs/farsh-sets.md`) |
+| `layout.<key>` | `layout_<key>_v1.db` (built and released by **`wursha-layouts`**, not wursha-data) | `mosshf` (verse geometry, one row per verse per page, `segment`), optional `words`; served through `/db/layout.<key>` only. A layout's farsh is the `farsh.<set>` its `layout.json` names |
 
 wursha-data releases up to `v2026.11.1` also have the legacy per-edition geometry: `mosshf_<edition>` tables and `<edition>_search` views in `quran`, `farsh_v15.db` and `words_<layout>_v1.db`. They are not served: their file names don't match the target pattern (§13), and no curated route reads the tables (raw SQL on `/db/quran` still can, on such a release). `words.madina` is still released (wursha-layouts' reference of word ids) but not served either.
 
@@ -138,7 +139,7 @@ The `/editions/:edition/…` routes (verse positions, `/full`, search, farsh, wo
 
 ### 7.A.2 Raw SQL on one content DB: `GET /db/:target?sql=…`
 
-The channel the app's web build uses (`ContentDbService.query(target, sql)` in Wursha_QuranHolder): the SQL is the same the Cordova and Electron builds run on the same file. `:target` must match `quran|book.<x>|word.<x>|layout.<x>` and be a known target, else `400` (also for the retired `farsh` and `words.<x>`). `SELECT` only (`400 ERR_NOT_SELECT`), empty `sql` → `200 []`, errors → `400 <code>: <message>`. Trusted network only (§10).
+The channel the app's web build uses (`ContentDbService.query(target, sql)` in Wursha_QuranHolder): the SQL is the same the Cordova and Electron builds run on the same file. `:target` must match `quran|book.<x>|word.<x>|farsh.<x>|layout.<x>` and be a known target, else `400` (also for the retired `farsh`, with no set, and `words.<x>`). `SELECT` only (`400 ERR_NOT_SELECT`), empty `sql` → `200 []`, errors → `400 <code>: <message>`. Trusted network only (§10).
 
 ### 7.A.1 Static assets
 
@@ -244,13 +245,13 @@ One suite, `src/app.spec.ts`. Tests use Hono's built-in `app.request('/…')` wh
 
 `beforeAll` calls `openContentDbs(contentDbDirs(process.cwd()), layoutDbDirs(process.cwd()))`, so tests run against the split files of a local `../wursha-data` build (or the app's fetched release) and the layout DBs of a local `../wursha-layouts` build (or the app's fetched layouts release). Add a fixture-DB path here when CI environments lack the binaries.
 
-Coverage (29 tests): `/db/:target` (core, book and layout SELECTs; unknown, malformed and retired (`farsh`, `words.madina`) target → 400; write → 400), the book window (happy path, unknown book → 400), 404s for the removed `/d`, `/f`, `/w`, `/i` and every removed `/editions/:edition/…` route, and a CORS smoke check.
+Coverage (31 tests): `/db/:target` (core, book, farsh set and layout SELECTs; unknown (`book.nope`, `farsh.nope`), malformed and retired (`farsh`, `words.madina`) target → 400; write → 400), the book window (happy path, unknown book → 400), 404s for the removed `/d`, `/f`, `/w`, `/i` and every removed `/editions/:edition/…` route, and a CORS smoke check.
 
 ---
 
 ## 13. Operational notes and known issues
 
-- **Old and retired files in a folder are ignored.** `data_v*.db`, `words_v*.db`, `index_v*.db` (monolithic), `farsh_v*.db` and `words_<layout>_v*.db` (retired legacy geometry) don't match the target pattern; delete leftovers.
+- **Old and retired files in a folder are ignored.** `data_v*.db`, `words_v*.db`, `index_v*.db` (monolithic), `farsh_v*.db` (no set) and `words_<layout>_v*.db` (retired legacy geometry) don't match the target pattern; delete leftovers.
 - **Strict TS checks disabled.** New code should not rely on this; ideally re-enable `strictNullChecks` incrementally.
 - **`@libsql/client` ships native bindings.** Install pulls a prebuilt binary for the current OS/arch (macOS, Linux, Windows on x64 / arm64). No build toolchain required, but the install footprint is larger than the previous `node:sqlite` (which was built into Node).
 

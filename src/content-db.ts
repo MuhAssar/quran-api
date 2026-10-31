@@ -6,13 +6,15 @@ import { join, resolve } from 'node:path';
  * The split content DBs of the wursha-data repo, plus the layout DBs of the wursha-layouts repo, one
  * client per target, created on first use (Wursha_QuranHolder specs/data-db-split.md §5). A target
  * names one file: `<target with . → _>_v<N>.db` (`quran` → `quran_v1.db`, `book.tabary` →
- * `book_tabary_v1.db`, `layout.madina` → `layout_madina_v1.db`).
+ * `book_tabary_v1.db`, `farsh.madina` → `farsh_madina_v1.db`, `layout.madina` → `layout_madina_v1.db`).
+ * A farsh set is the farsh of one page set, shared by the layouts on those pages (Wursha_QuranHolder
+ * specs/farsh-sets.md); the retired legacy `farsh_v15.db` (no set) doesn't match.
  */
 
 export const TARGET_RE =
-  /^(quran|book\.[a-z0-9]+|word\.[a-z0-9]+|layout\.[a-z0-9]+)$/;
+  /^(quran|book\.[a-z0-9]+|word\.[a-z0-9]+|farsh\.[a-z0-9]+|layout\.[a-z0-9]+)$/;
 const FILE_RE =
-  /^(quran|book_[a-z0-9]+|word_[a-z0-9]+|layout_[a-z0-9]+)_v(\d+)\.db$/;
+  /^(quran|book_[a-z0-9]+|word_[a-z0-9]+|farsh_[a-z0-9]+|layout_[a-z0-9]+)_v(\d+)\.db$/;
 const LAYOUT_FILE_RE = /^layout_[a-z0-9]+_v\d+\.db$/;
 
 interface Entry {
