@@ -6,11 +6,11 @@ This document is the single source of truth for the design, behavior, and operat
 
 ## 1. Purpose
 
-`quran-api` is a small HTTP service that exposes the contents of several pre-built SQLite databases of Quran-related data (text, mushaf layout, words, translations, tafsir, qira'at, etc.) to client applications.
+`quran-api` is a small HTTP service that exposes the contents of several pre-built SQLite databases of Quran-related data (text, mushaf layouts, translations, tafsir, qira'at, word pages, etc.) to client applications.
 
-The databases are the **split content DBs** of the private `wursha-data` repo (October 2026, Wursha_QuranHolder `specs/data-db-split.md`): a core `quran_v1.db`, one `book_<key>_v1.db` per book, one `words_<layout>_v1.db` per word-coordinate layout, one `word_<key>_v1.db` per word-page tab and `farsh_v15.db`, plus one `layout_<key>_v1.db` per Mushaf layout from the private `wursha-layouts` repo. Each file is a **target** (`quran`, `book.tabary`, `words.madina`, `word.sarf`, `farsh`, `layout.madina`); the app (web build) sends its SQL to `GET /db/:target` (§7.A.2), the same SQL the Cordova and Electron builds run on the same files. The monolithic `data_v25.db` / `words_v5.db` / `farsh_v15.db` copies and their `data`/`farsh`/`words` roles are gone, with the legacy `/d`, `/f`, `/w` routes (removed after the app switched, data-db-split §5.4 step 3).
+The databases are the **split content DBs** of the private `wursha-data` repo (October 2026, Wursha_QuranHolder `specs/data-db-split.md`): a core `quran_v1.db`, one `book_<key>_v1.db` per book and one `word_<key>_v1.db` per word-page tab, plus one `layout_<key>_v1.db` per Mushaf layout from the private `wursha-layouts` repo. Each file is a **target** (`quran`, `book.tabary`, `word.sarf`, `layout.madina`); the app (web build) sends its SQL to `GET /db/:target` (§7.A.2), the same SQL the Cordova and Electron builds run on the same files. All Mushaf geometry (verse, word and farsh positions) is in the layout DBs; the per-edition geometry (`mosshf_<edition>`, `<edition>_search`, `words.<layout>`, `farsh`) and the `/editions/:edition/…` routes that read it are gone (removed after the app read every page from its layout, Wursha_QuranHolder PR #235). The monolithic `data_v25.db` / `words_v5.db` / `farsh_v15.db` copies and their `data`/`farsh`/`words` roles are gone, with the legacy `/d`, `/f`, `/w` routes (removed after the app switched, data-db-split §5.4 step 3).
 
-The service exposes a **curated, typed REST surface** (14 endpoints, §7) over the bundled databases. All endpoint inputs are validated and bound as SQL parameters; no client-supplied SQL is executed.
+The service exposes a small **curated, typed REST surface** (the health check and the book window, §7) over the bundled databases. Its inputs are validated and bound as SQL parameters; no client-supplied SQL is executed.
 
 Next to the curated surface, `GET /db/:target?sql=` (§7.A.2) runs `SELECT`s from the app's web build on one content DB; it is trusted-network only (§10).
 
@@ -62,20 +62,13 @@ quran-api/
 │   ├── server.ts                # Entry point: opens DBs, starts the Node server
 │   ├── app.ts                   # Hono app: all routes (curated + /db/:target)
 │   ├── content-db.ts            # split content DBs: target registry, one libsql client per target, /db/:target
-│   ├── editions.ts              # Edition allow-lists and per-resource capability checks
-│   ├── validators.ts            # assertInt / assertFloat / assertBookCode / optionalInt
+│   ├── validators.ts            # assertInt / assertBookCode
 │   └── app.spec.ts              # Jest tests using `app.request()`
 ├── docs/api/                    # Bruno HTTP collection
 │   ├── bruno.json
 │   ├── hello.bru                # legacy /
 │   ├── curated/                 # curated REST examples
-│   │   ├── aya.bru
-│   │   ├── page-ayat.bru
-│   │   ├── aya-full.bru
-│   │   ├── search.bru
-│   │   ├── book-nearest.bru
-│   │   ├── farsh.bru
-│   │   └── word.bru
+│   │   └── book-nearest.bru
 │   └── environments/localhost.bru
 ├── *.db                         # SQLite database files (see §6). Gitignored.
 ├── tsconfig.json
@@ -112,14 +105,12 @@ Built and released by the `wursha-data` repo (its README lists the schemas; `_me
 
 | Target | File | Tables |
 |---|---|---|
-| `quran` | `quran_v1.db` | `mosshf_madina\|shmrly\|tjwid\|libya\|hafs`, `book_quran`, `book_quranu`, `quran_colors`, views `<edition>_search` |
-| `farsh` | `farsh_v15.db` | `madina`, `shmrly` |
-| `words.<layout>` | `words_<layout>_v1.db` (`madina`, `shmrly`, `tjwid`) | `words (wordindex, wordsno, aya_index, surah, ayah, page_number, x, y, width, word, rawword, root)`, key `(wordindex, wordsno)`; `madina` has no marker rows (`wordsno` 999/1000/1001) |
+| `quran` | `quran_v1.db` | `verses`, `book_quran`, `book_quranu`, `quran_colors`, view `quran_text` |
 | `book.<key>` | `book_<key>_v1.db` (62 books) | `book (aya_index INTEGER PRIMARY KEY, text)` |
 | `word.<key>` | `word_<key>_v1.db` (`meaning`, `sarf`, `irab`, `qeraat`, `trns`) | `word (wordindex INTEGER PRIMARY KEY, text)`; `qeraat` also `text_n` (the old `qeraatN`) |
 | `layout.<key>` | `layout_<key>_v1.db` (built and released by **`wursha-layouts`**, not wursha-data) | `mosshf` (verse geometry, one row per verse per page, `segment`), optional `words`, `farsh`; served through `/db/layout.<key>` only |
 
-The `<edition>_all` and `<edition>_words` views of the monolithic files are gone: `/full` and the word routes compose the rows in code (§7.A).
+wursha-data releases up to `v2026.11.1` also have the legacy per-edition geometry: `mosshf_<edition>` tables and `<edition>_search` views in `quran`, `farsh_v15.db` and `words_<layout>_v1.db`. They are not served: their file names don't match the target pattern (§13), and no curated route reads the tables (raw SQL on `/db/quran` still can, on such a release). `words.madina` is still released (wursha-layouts' reference of word ids) but not served either.
 
 ---
 
@@ -127,9 +118,9 @@ The `<edition>_all` and `<edition>_words` views of the monolithic files are gone
 
 Base URL (default): `http://localhost:3000`
 
-### 7.A Curated REST surface (14 routes)
+### 7.A Curated REST surface (2 routes)
 
-All curated GET responses set `Cache-Control: public, s-maxage=86400, stale-while-revalidate=604800` so a future edge cache absorbs most traffic. All inputs are validated and bound as SQL parameters; table/view names are only ever interpolated *after* the corresponding allow-list check.
+Curated JSON responses set `Cache-Control: public, s-maxage=86400, stale-while-revalidate=604800` so a future edge cache absorbs most traffic. All inputs are validated and bound as SQL parameters; the book key is only interpolated into the target name *after* the allow-list check.
 
 **Health**
 
@@ -137,54 +128,17 @@ All curated GET responses set `Cache-Control: public, s-maxage=86400, stale-whil
 |---|---|---|
 | `GET` | `/` | Returns the literal string `Hello World!` (`Content-Type: text/plain`). |
 
-**Mosshf (aya position)** (editions: `madina`, `shmrly`, `libya`, `tjwid`, `hafs`)
-
-| Method | Path | Returns |
-|---|---|---|
-| `GET` | `/editions/:edition/aya/:idx` | One row from `mosshf_${edition}` by global aya index (1..6236) |
-| `GET` | `/editions/:edition/sora/:s/aya/:n` | One row, by sura number (1..114) + aya number (1..286) |
-| `GET` | `/editions/:edition/sora/:s/aya/:n/page` | Projected `page_number` only |
-| `GET` | `/editions/:edition/page/:n/ayat` | All ayat on a page (1..604), ordered |
-
-**Composite "all-data"** (editions: `madina`, `shmrly`, `libya`, `tjwid`)
-
-| Method | Path | Returns |
-|---|---|---|
-| `GET` | `/editions/:edition/aya/:idx/full` | The `mosshf_${edition}` row plus `aya_text`, `aya_text_full`, `quranu` (the column names of the old `${edition}_all` view), and one column per book in `?books=a,b,…` (default: none; unknown book → 400), read from each `book.<key>`. `waqf` and `mwaqf` take the nearest preceding row (`NEAREST_BOOKS`), every other book its own row (`null` if none). |
-| `GET` | `/editions/:edition/page/:n/full` | All ayat on a page, same columns, ordered |
-
-**Search** (editions: `madina`, `shmrly`, `libya`, `tjwid`)
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/editions/:edition/search` | Query string: `q` (required), `field` ∈ `text\|text_uthamni\|text_full\|roots` (default `text`), `sora` (optional, 1..114), `limit` (default 100, max 1000). Returns rows from view `${edition}_search` matching `<field> LIKE '%q%'`. |
-| `GET` | `/editions/:edition/search/count` | Same inputs except `limit`. Returns `{count: N}`. |
-
 **Book window** (any allow-listed `bookCode`; allow-list = the `book.*` targets found at boot)
 
 | Method | Path | Returns |
 |---|---|---|
 | `GET` | `/book/:bookCode/aya/:idx/nearest` | `{text: …}` — the nearest row of `book` on `book.<bookCode>` where `aya_index <= idx`. `null` if none. |
 
-**Farsh** (editions: `madina`, `shmrly`)
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/editions/:edition/page/:n/farsh` | Query string: `qaree` ∈ `{A..Z}` (allow-listed), `waqf` ∈ `true\|false` (default `false`). Returns rows from physical table `madina`/`shmrly`. |
-
-**Words** (editions: `madina`, `shmrly`, `tjwid`)
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/editions/:edition/page/:n/word/at` | Query string: `x`, `y` (floats 0..1). Returns the first word of `words` on `words.<layout>` whose box contains `(x, y)`. |
-| `GET` | `/editions/:edition/word/:wordindex` | The word's layout row (`wordsno < 999`, so no marker row) plus `meaning`, `sarf`, `irab`, `qeraat`, `qeraatN`, `trns` from the five `word.<key>` packs. |
-| `GET` | `/editions/:edition/word/:wordindex/aya-first` | `{wordindex}` of the first word in the same aya. With `?before=true`, the first word *before* `:wordindex` in that aya. |
-
-The edition → layout map is `WORDS_LAYOUT` in `editions.ts` (`madina`, `shmrly`, `tjwid` → their own layout).
+The `/editions/:edition/…` routes (verse positions, `/full`, search, farsh, words) are removed with the per-edition geometry they read (§1); they return `404`.
 
 ### 7.A.2 Raw SQL on one content DB: `GET /db/:target?sql=…`
 
-The channel the app's web build uses (`ContentDbService.query(target, sql)` in Wursha_QuranHolder): the SQL is the same the Cordova and Electron builds run on the same file. `:target` must match `farsh|quran|words.<x>|book.<x>|word.<x>` and be a known target, else `400`. `SELECT` only (`400 ERR_NOT_SELECT`), empty `sql` → `200 []`, errors → `400 <code>: <message>`. Trusted network only (§10).
+The channel the app's web build uses (`ContentDbService.query(target, sql)` in Wursha_QuranHolder): the SQL is the same the Cordova and Electron builds run on the same file. `:target` must match `quran|book.<x>|word.<x>|layout.<x>` and be a known target, else `400` (also for the retired `farsh` and `words.<x>`). `SELECT` only (`400 ERR_NOT_SELECT`), empty `sql` → `200 []`, errors → `400 <code>: <message>`. Trusted network only (§10).
 
 ### 7.A.1 Static assets
 
@@ -197,14 +151,12 @@ This route is **Node-only**: it is registered in `src/server.ts` (not `src/app.t
 ### 7.C Response shape
 
 - `Content-Type: application/json; charset=UTF-8` for JSON routes.
-- Single-row endpoints return either the row object or `null` (book/word window, word-at).
-- List endpoints return an array.
+- The book window returns the row object or `null`; `/db/:target` returns an array.
 - `@libsql/client` returns `Row` objects whose own enumerable properties are exactly the column names, so `JSON.stringify` produces clean `{col: val, …}` objects with no numeric-index duplication.
 
 ### 7.D Errors
 
-- Bad input (missing/invalid path or query param, unknown bookCode/qaree/edition) → `400` with `Content-Type: text/plain`.
-- Known edition but the requested *resource* doesn't exist for it (e.g. `/editions/libya/page/1/farsh` — libya has no farsh table) → `404`.
+- Bad input (missing/invalid path param, unknown bookCode) → `400` with `Content-Type: text/plain`.
 - Underlying `LibsqlError` → `400` with `<code>: <message>\n`.
 - Unknown content DB target → `400 ERR_UNKNOWN_TARGET`.
 
@@ -220,13 +172,11 @@ The `docs/api/` folder is a Bruno collection demonstrating each endpoint. The `l
 
 ## 8. Code architecture
 
-Five small modules, no DI container:
+Four small modules, no DI container:
 
 - `src/content-db.ts` — the split content DBs. Exports `TARGET_RE`; `contentDbDirs(repoRoot)` (§5 step 1); `openContentDbs(dirs)` → `{ source, targets }`; `hasTarget(target)`; `getPackKeys('book' | 'word')` (keys of the `book.*` / `word.*` targets); `executeOn(target, sql, args?)` (bound query; one client per target, created on first use, `_meta.key` checked; unknown target → `ERR_UNKNOWN_TARGET`); `runTargetQuery(target, sql)` (`/db/:target`: empty → `[]`, non-`SELECT` → `ERR_NOT_SELECT`); `closeContentDbs()` for tests.
-
-- `src/editions.ts` — edition allow-list + per-resource capability sets (`CAP_MOSSHF`, `CAP_ALL_SEARCH`, `CAP_WORDS`, `CAP_FARSH`); qaree allow-list; search-field allow-list. Exports `assertEdition(value, cap, capName)`, `assertQaree`, `assertSearchField` — each throws `HTTPException(400|404, …)`.
-- `src/validators.ts` — `assertInt`, `optionalInt`, `assertFloat`, `assertBookCode`. Pure helpers throwing `HTTPException(400, …)`.
-- `src/app.ts` — exports `createApp(): Hono`. Registers `cors()` (config from `CORS_ORIGINS`), `GET /db/:target` (§7.A.2) and the 14 curated routes (§7.A). Each curated handler is async and follows the same shape: parse + validate path/query params via helpers, build a parameterized SQL string with the validated edition/book interpolated, await `executeOn(target, sql, args)`, return `c.json(rows)` with `Cache-Control: public, s-maxage=86400, stale-while-revalidate=604800`.
+- `src/validators.ts` — `assertInt`, `assertBookCode`. Pure helpers throwing `HTTPException(400, …)`.
+- `src/app.ts` — exports `createApp(): Hono`. Registers `cors()` (config from `CORS_ORIGINS`), `GET /db/:target` (§7.A.2) and the curated routes (§7.A). The book window validates its params, awaits `executeOn('book.<key>', sql, args)` and returns the row with `Cache-Control: public, s-maxage=86400, stale-while-revalidate=604800`.
 - `src/server.ts` — the entry point. Reads `PORT`, `HOST`. Calls `openContentDbs(contentDbDirs(..))` (`process.exit(1)` without `quran`), registers the Node-only static route `GET /athkar.zip` (§7.A.1) via `serveStatic`, then `serve({ fetch: app.fetch, port, hostname })`.
 
 There are no DTOs, pipes, guards, or interceptors. The only middleware is Hono's `cors()`.
@@ -253,10 +203,10 @@ All via environment variables, read directly with `process.env`. No `.env` loade
 ## 10. Security model
 
 The **curated routes (§7.A) are safe to expose publicly.** Every endpoint:
-- validates path/query inputs against typed ranges and allow-lists (editions, qaree, search-field, bookCode);
-- interpolates only allow-listed strings into table/view names;
+- validates path inputs against typed ranges and allow-lists (bookCode);
+- interpolates only allow-listed strings into target names;
 - binds every value as a SQL parameter (`@libsql/client` `{ sql, args }`) — no string concatenation;
-- caps result sets (per-page for mosshf/composite; max 1000 for search; single-row for word lookups and book window).
+- returns a single row (book window).
 
 **`GET /db/:target` (§7.A.2) is not safe for public exposure:** clients submit raw SQL, gated only by the `SELECT`-only check (`SELECT … RETURNING …` would pass), with no resource limits (a pathological cross join runs until it finishes), and error bodies expose SQLite internals. Every file is opened read-only through libsql, but a public deployment needs the curated routes only, or a parser/allowlist in front of `/db`.
 
@@ -294,17 +244,15 @@ One suite, `src/app.spec.ts`. Tests use Hono's built-in `app.request('/…')` wh
 
 `beforeAll` calls `openContentDbs(contentDbDirs(process.cwd()), layoutDbDirs(process.cwd()))`, so tests run against the split files of a local `../wursha-data` build (or the app's fetched release) and the layout DBs of a local `../wursha-layouts` build (or the app's fetched layouts release). Add a fixture-DB path here when CI environments lack the binaries.
 
-Coverage (36 tests): `/db/:target` (core and book SELECTs, unknown and malformed target → 400, write → 400), `/full` with and without `?books=` (nearest-row `waqf`, unknown book → 400), plus, from before: every curated route's happy path, at least one 400/404 per route, spot-checks (`/full` core texts; `search` caps at 1000; capability gaps return 404), 404s for the removed `/d`, `/f`, `/w`, `/i` and `/editions/:edition/sora`, and a CORS smoke check.
+Coverage (29 tests): `/db/:target` (core, book and layout SELECTs; unknown, malformed and retired (`farsh`, `words.madina`) target → 400; write → 400), the book window (happy path, unknown book → 400), 404s for the removed `/d`, `/f`, `/w`, `/i` and every removed `/editions/:edition/…` route, and a CORS smoke check.
 
 ---
 
 ## 13. Operational notes and known issues
 
-- **Old monolithic files in a folder are ignored.** `data_v*.db`, `words_v*.db` and `index_v*.db` don't match the target pattern; delete leftovers.
+- **Old and retired files in a folder are ignored.** `data_v*.db`, `words_v*.db`, `index_v*.db` (monolithic), `farsh_v*.db` and `words_<layout>_v*.db` (retired legacy geometry) don't match the target pattern; delete leftovers.
 - **Strict TS checks disabled.** New code should not rely on this; ideally re-enable `strictNullChecks` incrementally.
 - **`@libsql/client` ships native bindings.** Install pulls a prebuilt binary for the current OS/arch (macOS, Linux, Windows on x64 / arm64). No build toolchain required, but the install footprint is larger than the previous `node:sqlite` (which was built into Node).
-- **Search uses simple `LIKE '%q%'` matching.** No Arabic normalization or pattern/word/root modes (yet). The audit found Wursha_QuranHolder normalizes Arabic text client-side before constructing the SQL; that normalization currently runs on the client and is preserved transparently because the curated `/search` simply substring-matches. Moving the normalization server-side is a follow-up — it lets clients pass raw query text and lets the server apply consistent rules.
-- **Edition coverage is asymmetric.** `*_all`/`*_search` for `madina`/`shmrly`/`libya`/`tjwid`; `*_words` for `madina`/`shmrly`/`tjwid`; farsh tables for `madina`/`shmrly`. Other editions (warsh, qalon, hafs, …) ship as separate Cordova builds and don't currently need HTTP coverage. Requests for unsupported editions return `404`.
 
 ---
 

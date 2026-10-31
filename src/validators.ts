@@ -18,34 +18,6 @@ export function assertInt(
   return n;
 }
 
-export function optionalInt(
-  value: string | undefined,
-  name: string,
-  min: number,
-  max: number,
-): number | undefined {
-  if (value === undefined || value === '') return undefined;
-  return assertInt(value, name, min, max);
-}
-
-export function assertFloat(
-  value: string | undefined,
-  name: string,
-  min: number,
-  max: number,
-): number {
-  if (value === undefined || value === '') {
-    throw new HTTPException(400, { message: `missing ${name}\n` });
-  }
-  const n = Number(value);
-  if (!Number.isFinite(n) || n < min || n > max) {
-    throw new HTTPException(400, {
-      message: `invalid ${name}: ${value} (expected number in [${min}, ${max}])\n`,
-    });
-  }
-  return n;
-}
-
 export function assertBookCode(
   value: string | undefined,
   bookCodes: ReadonlySet<string>,
