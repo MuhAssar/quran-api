@@ -6,13 +6,13 @@ import { join, resolve } from 'node:path';
  * The split content DBs of the wursha-data repo, plus the layout DBs of the wursha-layouts repo, one
  * client per target, created on first use (Wursha_QuranHolder specs/data-db-split.md §5). A target
  * names one file: `<target with . → _>_v<N>.db` (`quran` → `quran_v1.db`, `book.tabary` →
- * `book_tabary_v1.db`, `layout.madina` → `layout_madina_v1.db`).
+ * `book_tabary_v1.db`, `layout.madina` → `layout_madina_v1.db`, `farsh.shmrly` → `farsh_shmrly_v1.db`).
  */
 
 export const TARGET_RE =
-  /^(farsh|quran|words\.[a-z0-9]+|book\.[a-z0-9]+|word\.[a-z0-9]+|layout\.[a-z0-9]+)$/;
+  /^(farsh|farsh\.[a-z0-9]+|quran|words\.[a-z0-9]+|book\.[a-z0-9]+|word\.[a-z0-9]+|layout\.[a-z0-9]+)$/;
 const FILE_RE =
-  /^(farsh|quran|words_[a-z0-9]+|book_[a-z0-9]+|word_[a-z0-9]+|layout_[a-z0-9]+)_v(\d+)\.db$/;
+  /^(farsh|farsh_[a-z0-9]+|quran|words_[a-z0-9]+|book_[a-z0-9]+|word_[a-z0-9]+|layout_[a-z0-9]+)_v(\d+)\.db$/;
 const LAYOUT_FILE_RE = /^layout_[a-z0-9]+_v\d+\.db$/;
 
 interface Entry {

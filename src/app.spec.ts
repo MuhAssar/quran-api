@@ -66,6 +66,16 @@ describe('split content DBs (GET /db/:target)', () => {
     expect(rows[0].n).toBe(6236);
   });
 
+  it('runs a SELECT on a farsh set (farsh.<set>)', async () => {
+    const res = await app.request(
+      '/db/farsh.shmrly?sql=' +
+        encodeURIComponent('SELECT count(*) AS n FROM farsh WHERE page_number = 5'),
+    );
+    expect(res.status).toBe(200);
+    const rows = (await res.json()) as Array<{ n: number }>;
+    expect(rows[0].n).toBeGreaterThan(0);
+  });
+
   it('rejects an unknown target with 400', async () => {
     const res = await app.request(
       '/db/book.nope?sql=' + encodeURIComponent('SELECT 1'),
